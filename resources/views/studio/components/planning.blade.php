@@ -23,15 +23,33 @@
                 Start Over
             </button>
         </div>
+        <div id="workflow-preview" class="hidden bg-white border rounded-2xl p-4">
+            <div class="flex justify-between items-center mb-2">
+                <h3 class="text-sm font-semibold">Generated Workflow</h3>
+                <button id="btn-save-workflow">Save</button>
+            </div>
+            <textarea id="workflow-json"
+                class="w-full h-64 text-xs font-mono border rounded p-2"></textarea>
+        </div>
+        
     </div>
 
     {{-- Input --}}
     <div id="input-area" class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden focus-within:border-forest-400 focus-within:shadow-md transition-all duration-200">
+        <div id="attached-files" class="hidden px-5 pt-3 pb-0"></div>
         <textarea id="user-input" rows="2"
             placeholder="Describe what you want to create..."
             class="w-full px-5 pt-4 pb-2 text-sm resize-none bg-transparent border-none focus:ring-0 text-gray-800 placeholder-gray-400"></textarea>
         <div class="flex items-center justify-between px-4 pb-3">
-            <span class="text-xs text-gray-400">Enter to send · Shift+Enter for new line</span>
+            <div class="flex items-center gap-3">
+                <label for="file-input" class="cursor-pointer p-1.5 text-gray-400 hover:text-forest-600 hover:bg-forest-50 rounded-lg transition" title="Attach file">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/>
+                    </svg>
+                </label>
+                <input type="file" id="file-input" class="hidden" accept="image/*,video/*,audio/*" multiple>
+                <span class="text-xs text-gray-400">Enter to send · Shift+Enter for new line</span>
+            </div>
             <button id="btn-send"
                 class="px-5 py-2 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-medium transition shadow-sm flex items-center gap-2">
                 <span>Send</span>

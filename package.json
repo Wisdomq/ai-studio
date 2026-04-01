@@ -13,5 +13,9 @@
         "laravel-vite-plugin": "^3.0.0",
         "tailwindcss": "^4.0.0",
         "vite": "^8.0.0"
+    },
+    "dependencies": {
+        "opencode-linux-x64": "^1.3.0",
+        "opencode-linux-x64-baseline": "^1.3.0"
     }
 }

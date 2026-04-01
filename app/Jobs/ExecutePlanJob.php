@@ -292,15 +292,31 @@ class ExecutePlanJob implements ShouldQueue
         // ── 1. User-uploaded input file (supplied during refinement phase) ────
         // This handles workflows like image_to_video / face_swap where the user
         // provides a source file from the start, not from a prior step's output.
-        if (! empty($step->input_file_path)) {
-            if (! Storage::disk('public')->exists($step->input_file_path)) {
+        $inputFilePath = $step->input_file_path;
+
+        // If no step-level input file, check plan-level input_files (from planning phase)
+        if (empty($inputFilePath)) {
+            $planInputFiles = $plan->input_files ?? [];
+            $workflowInputTypes = $step->workflow->input_types ?? [];
+
+            foreach ($planInputFiles as $file) {
+                $mediaType = $file['media_type'] ?? null;
+                if ($mediaType && in_array($mediaType, $workflowInputTypes)) {
+                    $inputFilePath = $file['storage_path'];
+                    break;
+                }
+            }
+        }
+
+        if (! empty($inputFilePath)) {
+            if (! Storage::disk('public')->exists($inputFilePath)) {
                 throw new \RuntimeException(
-                    "User-uploaded input file missing: {$step->input_file_path}"
+                    "User-uploaded input file missing: {$inputFilePath}"
                 );
             }
 
             // Determine media type from file extension
-            $ext       = strtolower(pathinfo($step->input_file_path, PATHINFO_EXTENSION));
+            $ext       = strtolower(pathinfo($inputFilePath, PATHINFO_EXTENSION));
             $mediaType = match (true) {
                 in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif']) => 'image',
                 in_array($ext, ['mp4', 'webm', 'mov'])                => 'video',
@@ -308,8 +324,8 @@ class ExecutePlanJob implements ShouldQueue
                 default                                                => 'image',
             };
 
-            $files[$mediaType] = $step->input_file_path;
-            Log::info("ExecutePlanJob: User-uploaded {$mediaType} input → {$step->input_file_path}");
+            $files[$mediaType] = $inputFilePath;
+            Log::info("ExecutePlanJob: User-uploaded {$mediaType} input → {$inputFilePath}");
         }
 
         // ── 2. Dependency outputs from prior steps ────────────────────────────

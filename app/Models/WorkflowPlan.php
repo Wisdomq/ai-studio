@@ -23,11 +23,13 @@ class WorkflowPlan extends Model
         'status',
         'queue_position',
         'mood_board',
+        'input_files',
     ];
 
     protected $casts = [
         'plan_steps'     => 'array',
         'mood_board'     => 'array',
+        'input_files'    => 'array',
         'queue_position' => 'integer',
     ];
 

@@ -92,6 +92,11 @@ class Workflow extends Model
     {
         $raw = $this->workflow_json;
 
+        // Auto-detect inject_keys if not set or empty
+        if (empty($this->inject_keys)) {
+            $this->inject_keys = $this->detectInjectKeysFromJson($raw);
+        }
+
         // Double-decode guard — handles workflows stored as double-encoded JSON
         if (is_string($raw) && str_starts_with(trim($raw), '"')) {
             $unwrapped = json_decode($raw, true);
@@ -112,11 +117,15 @@ class Workflow extends Model
         $esc = fn(string $value): string => substr(json_encode($value), 1, -1);
 
         // ── Standard placeholder defaults ─────────────────────────────────────
+        // Handle both unquoted ({{SEED}}) and quoted ("{{SEED}}") versions
+        // Note: {{SEED}} / "{{SEED}}" are intentionally omitted here — seed
+        // randomization is handled by the auto-seed node walk below, which
+        // correctly writes seed values as JSON integers (not strings).
         $replacements = [
+            // Unquoted versions
             '{{PROMPT}}'           => $esc($prompt),
             '{{POSITIVE_PROMPT}}'  => $esc($prompt),
             '{{NEGATIVE_PROMPT}}'  => $esc('blurry, low quality, distorted, deformed, ugly, bad anatomy, watermark, text, logo, out of frame, duplicate, worst quality, jpeg artifacts, noise'),
-            '{{SEED}}'             => (string) rand(1, 999_999_999),
             '{{STEPS}}'            => '20',
             '{{CFG}}'              => '7.0',
             '{{WIDTH}}'            => '512',
@@ -124,9 +133,23 @@ class Workflow extends Model
             '{{FRAME_COUNT}}'      => '16',
             '{{FPS}}'              => '8',
             '{{MOTION_STRENGTH}}'  => '127',
-            '{{DURATION}}'         => '10',
+            '{{DURATION}}'        => '10',
             '{{SAMPLE_RATE}}'      => '44100',
             '{{DENOISE}}'          => '1.0',
+            // Quoted versions (normalized JSON storage format)
+            '"{{PROMPT}}"'           => $esc($prompt),
+            '"{{POSITIVE_PROMPT}}"'  => $esc($prompt),
+            '"{{NEGATIVE_PROMPT}}"'  => $esc('blurry, low quality, distorted, deformed, ugly, bad anatomy, watermark, text, logo, out of frame, duplicate, worst quality, jpeg artifacts, noise'),
+            '"{{STEPS}}"'            => '20',
+            '"{{CFG}}"'              => '7.0',
+            '"{{WIDTH}}"'            => '512',
+            '"{{HEIGHT}}"'           => '512',
+            '"{{FRAME_COUNT}}"'      => '16',
+            '"{{FPS}}"'              => '8',
+            '"{{MOTION_STRENGTH}}"'  => '127',
+            '"{{DURATION}}"'        => '10',
+            '"{{SAMPLE_RATE}}"'      => '44100',
+            '"{{DENOISE}}"'          => '1.0',
         ];
 
         // ── File input injection via inject_keys map ──────────────────────────
@@ -134,7 +157,9 @@ class Workflow extends Model
         // inputFiles:  {"image": "comfy_assigned.png"}
         foreach ($this->inject_keys ?? [] as $mediaType => $placeholder) {
             if (isset($inputFiles[$mediaType])) {
+                // Handle both quoted and unquoted
                 $replacements[$placeholder] = $esc($inputFiles[$mediaType]);
+                $replacements['"' . $placeholder . '"'] = $esc($inputFiles[$mediaType]);
             }
         }
 
@@ -143,6 +168,36 @@ class Workflow extends Model
             array_values($replacements),
             $raw
         );
+
+        // ── Auto-seed pass ────────────────────────────────────────────────────
+        // Walk every ComfyUI node and replace any seed/noise_seed field with a
+        // fresh random number. This covers two cases:
+        //   1. Workflows with {{SEED}} placeholder — already replaced above, but
+        //      the quoted-string form ("{{SEED}}") leaves the value as a string;
+        //      this pass writes it as a proper JSON integer.
+        //   2. Workflows imported directly from ComfyUI with a hardcoded seed —
+        //      no placeholder was ever set, but we still want randomization.
+        // This mirrors what ComfyUI does internally in "randomize" mode.
+        $nodes = json_decode($injected, true);
+        if (is_array($nodes)) {
+            $seeded = false;
+            foreach ($nodes as &$node) {
+                if (! isset($node['inputs']) || ! is_array($node['inputs'])) {
+                    continue;
+                }
+                foreach (['noise_seed', 'seed'] as $seedKey) {
+                    if (array_key_exists($seedKey, $node['inputs'])) {
+                        $node['inputs'][$seedKey] = rand(1, 999_999_999);
+                        $seeded = true;
+                    }
+                }
+            }
+            unset($node);
+
+            if ($seeded) {
+                $injected = json_encode($nodes, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            }
+        }
 
         // Validate JSON after injection
         json_decode($injected);
@@ -161,14 +216,35 @@ class Workflow extends Model
 
     /**
      * True when this workflow has a real ComfyUI node graph loaded.
-     * Skeletons/stubs have a "_note" key or no class_type nodes.
+     * Skeletons/stubbs have a "_note" key or no class_type nodes.
      */
     public function hasRealWorkflow(): bool
     {
         if (empty($this->workflow_json)) {
             return false;
         }
-        $decoded = json_decode($this->workflow_json, true);
+
+        $json = $this->workflow_json;
+
+        // Substitute remaining numeric placeholders with dummy values so
+        // json_decode() can validate the structure. SEED is handled by the
+        // auto-seed node walk in injectPrompt() and needs no placeholder here.
+        $placeholders = [
+            '{{STEPS}}', '{{CFG}}', '{{WIDTH}}', '{{HEIGHT}}',
+            '{{FRAME_COUNT}}', '{{FPS}}', '{{MOTION_STRENGTH}}', '{{DURATION}}',
+            '{{SAMPLE_RATE}}', '{{DENOISE}}',
+            '"{{STEPS}}"', '"{{CFG}}"', '"{{WIDTH}}"', '"{{HEIGHT}}"',
+            '"{{FRAME_COUNT}}"', '"{{FPS}}"', '"{{MOTION_STRENGTH}}"', '"{{DURATION}}"',
+            '"{{SAMPLE_RATE}}"', '"{{DENOISE}}"',
+        ];
+        $values = [
+            '20', '7', '512', '512', '16', '8', '127', '10', '44100', '1',
+            '20', '7', '512', '512', '16', '8', '127', '10', '44100', '1',
+        ];
+
+        $json = str_replace($placeholders, $values, $json);
+
+        $decoded = json_decode($json, true);
         if (! is_array($decoded)) {
             return false;
         }
@@ -196,6 +272,47 @@ class Workflow extends Model
     public function injectKeyFor(string $mediaType): ?string
     {
         return ($this->inject_keys ?? [])[$mediaType] ?? null;
+    }
+
+    /**
+     * Auto-detect inject_keys from workflow JSON by scanning for INPUT_* placeholders.
+     */
+    protected function detectInjectKeysFromJson(string $raw): array
+    {
+        $injectKeys = [];
+
+        if (empty($raw)) {
+            return $injectKeys;
+        }
+
+        // Unwrap double-encoded JSON if needed
+        if (str_starts_with(trim($raw), '"')) {
+            $unwrapped = json_decode($raw, true);
+            if (is_string($unwrapped)) {
+                $raw = $unwrapped;
+            }
+        }
+
+        $patterns = [
+            'image' => '/\{\{INPUT_IMAGE\}\}/i',
+            'video' => '/\{\{INPUT_VIDEO\}\}/i',
+            'audio' => '/\{\{INPUT_AUDIO\}\}/i',
+        ];
+
+        foreach ($patterns as $mediaType => $pattern) {
+            if (preg_match($pattern, $raw)) {
+                $injectKeys[$mediaType] = "{{INPUT_" . strtoupper($mediaType) . "}}";
+            }
+        }
+
+        if (! empty($injectKeys)) {
+            \Illuminate\Support\Facades\Log::info("Workflow auto-detected inject_keys: ", [
+                'workflow' => $this->name,
+                'inject_keys' => $injectKeys,
+            ]);
+        }
+
+        return $injectKeys;
     }
 
     /**

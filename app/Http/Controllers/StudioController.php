@@ -8,6 +8,8 @@ use App\Jobs\ExecutePlanJob;
 use App\Models\WorkflowPlan;
 use App\Models\WorkflowPlanStep;
 use App\Models\Workflow;
+use App\Ai\Skills\WorkflowBuilderSkill;
+use App\Services\WorkflowBuilderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -23,7 +25,21 @@ class StudioController extends Controller
 
     public function index(): \Illuminate\View\View
     {
-        return view('studio.index');
+        $workflows = \App\Models\Workflow::active()
+            ->orderBy('output_type')
+            ->orderBy('name')
+            ->get(['id', 'name', 'description', 'output_type', 'input_types'])
+            ->map(fn ($w) => [
+                'id'          => $w->id,
+                'name'        => $w->name,
+                'description' => $w->description,
+                'output_type' => $w->output_type,
+                'input_types' => $w->input_types ?? [],
+            ])
+            ->values()
+            ->all();
+
+        return view('studio.index', compact('workflows'));
     }
 
     public function result(WorkflowPlan $plan): \Illuminate\View\View
@@ -34,12 +50,20 @@ class StudioController extends Controller
         return view('studio.result', compact('plan'));
     }
 
+    public function destroy(WorkflowPlan $plan): \Illuminate\Http\RedirectResponse
+    {
+        $this->authorisePlan($plan);
+        $plan->delete();
+
+        return redirect()->route('studio.generations')->with('success', 'Generation deleted.');
+    }
+
     public function generations(): \Illuminate\View\View
     {
         $sessionId = session()->getId();
         $plans     = WorkflowPlan::where('session_id', $sessionId)
             ->where('status', 'completed')
-            ->with('steps')
+            ->with(['steps' => fn($q) => $q->orderBy('step_order')])
             ->latest()
             ->paginate(12);
 
@@ -47,13 +71,95 @@ class StudioController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Phase 1 — Planning (SSE)
+    // Workflow Proposal — confirm (save) or cancel
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * POST /studio/planner
-     * SSE stream: OrchestratorAgent conversation turn.
+     * POST /studio/workflow/confirm
+     * User has reviewed the proposal and clicked Accept.
+     * Now we actually build + save the workflow.
      */
+    public function confirmWorkflow(Request $request): JsonResponse
+    {
+        $request->validate([
+            'intent' => 'required|string|min:5',
+        ]);
+
+        try {
+            $builder  = new WorkflowBuilderSkill($this->model);
+            $result   = $builder->buildFromIntent($request->input('intent'));
+
+            if (! $result['success']) {
+                return response()->json([
+                    'success' => false,
+                    'error'   => $result['error'] ?? 'Workflow creation failed.',
+                ], 500);
+            }
+
+            $workflow = $result['workflow'];
+            Log::info('StudioController: Workflow confirmed and saved', [
+                'workflow_id' => $workflow->id,
+                'name'        => $workflow->name,
+            ]);
+
+            return response()->json([
+                'success'     => true,
+                'workflow_id' => $workflow->id,
+                'name'        => $workflow->name,
+                'output_type' => $workflow->output_type,
+                'description' => $workflow->description,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('StudioController: confirmWorkflow failed', ['error' => $e->getMessage()]);
+            return response()->json([
+                'success' => false,
+                'error'   => 'Failed to save workflow: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    //Workflow Creation Endpoint — triggered by OrchestratorAgent signal
+
+    public function createWorkflow(Request $request): JsonResponse
+    {
+        $request->validate([
+            'intent' => 'required|string|min:5',
+        ]);
+
+        try {
+            $builder = new WorkflowBuilderService();
+
+            $workflow = $builder->buildFromIntent($request->input('intent'));
+
+            return response()->json([
+                'success'  => true,
+                'workflow' => [
+                    'id'          => $workflow->id,
+                    'name'        => $workflow->name,
+                    'description' => $workflow->description,
+                    'type'        => $workflow->type,
+                    'output_type' => $workflow->output_type,
+                ],
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('StudioController: Workflow creation failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error'   => 'Failed to create workflow. ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 1 — Planning (SSE)
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function planner(Request $request): \Symfony\Component\HttpFoundation\StreamedResponse
     {
         $request->validate([
@@ -72,11 +178,11 @@ class StudioController extends Controller
                     $this->sseEmit(['type' => 'chunk', 'content' => $chunk]);
                 });
 
-                // Parse signal from response (READY:<id> or AMBIGUOUS:<id1>,<id2>)
                 $signal = $agent->parseSignal($fullText, $messages);
 
                 if ($signal['type'] === 'ready' && $signal['plan'] !== null) {
                     $this->sseEmit(['type' => 'plan', 'plan' => $signal['plan']]);
+
                 } elseif ($signal['type'] === 'ambiguous') {
                     $workflows = \App\Models\Workflow::active()
                         ->whereIn('id', $signal['workflow_ids'])
@@ -96,6 +202,27 @@ class StudioController extends Controller
                         'type'      => 'ambiguous',
                         'workflows' => $workflows,
                     ]);
+
+                } elseif ($signal['type'] === 'create_workflow') {
+                    // Extract user intent from conversation
+                    $userIntent = '';
+                    foreach ($messages as $msg) {
+                        if ($msg['role'] === 'user') {
+                            $userIntent = $msg['content'];
+                            break;
+                        }
+                    }
+                    if (empty($userIntent) && ! empty($signal['intent'])) {
+                        $userIntent = $signal['intent'];
+                    }
+
+                    // Do NOT save yet — emit a proposal so the user can confirm or cancel
+                    // The actual save happens in confirmWorkflow() after user clicks Accept
+                    $this->sseEmit([
+                        'type'    => 'workflow_proposed',
+                        'intent'  => $userIntent,
+                    ]);
+
                 } else {
                     $plan = $agent->parsePlan($fullText);
                     if ($plan !== null) {
@@ -104,7 +231,6 @@ class StudioController extends Controller
                 }
 
             } catch (\Illuminate\Http\Client\ConnectionException $e) {
-                // Ollama timed out — most likely VRAM is saturated by ComfyUI
                 Log::warning('StudioController: Ollama connection timeout in planner', [
                     'error' => $e->getMessage(),
                 ]);
@@ -142,15 +268,20 @@ class StudioController extends Controller
             'steps.*.purpose'       => 'required|string',
             'steps.*.prompt_hint'   => 'nullable|string',
             'steps.*.depends_on'    => 'nullable|array',
+            'files'        => 'nullable|array',
+            'files.*.storage_path' => 'required|string',
+            'files.*.media_type'   => 'required|string|in:image,video,audio',
         ]);
 
         $sessionId = session()->getId();
+        $inputFiles = $request->input('files', []);
 
         $plan = WorkflowPlan::create([
-            'session_id'  => $sessionId,
+            'session_id'   => $sessionId,
             'user_intent' => $request->input('user_intent'),
-            'plan_steps'  => $request->input('steps'),
-            'status'      => 'pending',
+            'plan_steps'   => $request->input('steps'),
+            'status'       => 'pending',
+            'input_files'  => $inputFiles,
         ]);
 
         foreach ($request->input('steps') as $stepData) {
@@ -170,12 +301,13 @@ class StudioController extends Controller
         session(['workflow_session_id' => $sessionId]);
 
         return response()->json([
-            'plan_id' => $plan->id,
-            'steps'   => $plan->steps()->orderBy('step_order')->with('workflow')->get()
+            'plan_id'    => $plan->id,
+            'input_files' => $inputFiles,
+            'steps'      => $plan->steps()->orderBy('step_order')->with('workflow')->get()
                 ->map(fn($s) => [
-                    'id'           => $s->id,
-                    'step_order'   => $s->step_order,
-                    'purpose'      => $s->purpose,
+                    'id'            => $s->id,
+                    'step_order'    => $s->step_order,
+                    'purpose'       => $s->purpose,
                     'workflow_type' => $s->workflow_type,
                     'input_types'  => $s->workflow->input_types ?? [],
                 ]),
@@ -273,6 +405,18 @@ class StudioController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 3 — Execution
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * GET /studio/plan/{plan}/review
+     * Show review page for steps awaiting approval.
+     */
+    public function review(WorkflowPlan $plan): \Illuminate\View\View
+    {
+        $this->authorisePlan($plan);
+        $plan->load('steps.workflow');
+
+        return view('studio.review', compact('plan'));
+    }
 
     /**
      * POST /studio/plan/{plan}/dispatch
@@ -417,12 +561,31 @@ class StudioController extends Controller
     /**
      * GET /studio/plan/{plan}/status
      * Poll plan + step status. Frontend calls this every 4 seconds.
+     * We augment statusPayload() with output_path (storage-relative) on each
+     * step so the JS can attach a completed step's output as the input_file_path
+     * for any dependent step — without requiring a separate lookup.
      */
     public function status(WorkflowPlan $plan): JsonResponse
     {
         $this->authorisePlan($plan);
 
-        return response()->json($plan->statusPayload());
+        $payload = $plan->statusPayload();
+
+        // Inject output_path alongside output_url on each step entry.
+        // statusPayload() already loads steps; we just re-key the raw DB value.
+        if (isset($payload['steps']) && is_array($payload['steps'])) {
+            $stepModels = $plan->steps()->orderBy('step_order')->get()->keyBy('step_order');
+
+            $payload['steps'] = array_map(function (array $stepData) use ($stepModels) {
+                $order = $stepData['step_order'] ?? null;
+                if ($order !== null && isset($stepModels[$order])) {
+                    $stepData['output_path'] = $stepModels[$order]->output_path;
+                }
+                return $stepData;
+            }, $payload['steps']);
+        }
+
+        return response()->json($payload);
     }
 
     /**

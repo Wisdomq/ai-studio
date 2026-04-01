@@ -8,38 +8,42 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', fn () => redirect()->route('studio.index'));
 
 // ─── Studio Pipeline ──────────────────────────────────────────────────────────
-Route::prefix('studio')->name('studio.')->group(function () {
+
 
     // Views
-    Route::get('/',             [StudioController::class, 'index'])->name('index');
-    Route::get('/generations',  [StudioController::class, 'generations'])->name('generations');
-    Route::get('/plan/{plan}/result', [StudioController::class, 'result'])->name('result');
+Route::get('/studio',             [StudioController::class, 'index'])->name('studio.index');
+Route::get('/studio/generations',  [StudioController::class, 'generations'])->name('studio.generations');
+Route::get('/studio/plan/{plan}/result', [StudioController::class, 'result'])->name('studio.result');
+Route::delete('/studio/plan/{plan}', [StudioController::class, 'destroy'])->name('studio.plan.destroy');
 
     // Phase 1 — Planning
-    Route::post('/planner',      [StudioController::class, 'planner'])->name('planner');
-    Route::post('/plan/approve', [StudioController::class, 'approvePlan'])->name('plan.approve');
+Route::post('/studio/planner',      [StudioController::class, 'planner'])->name('studio.planner');
+Route::post('/studio/plan/approve', [StudioController::class, 'approvePlan'])->name('studio.plan.approve');
 
     // Phase 2 — Prompt Refinement
-    Route::post('/plan/refine-step',                    [StudioController::class, 'refineStep'])->name('plan.refine-step');
-    Route::post('/plan/{plan}/step/{order}/confirm',    [StudioController::class, 'confirmStep'])->name('plan.step.confirm');
+Route::post('/studio/plan/refine-step',                    [StudioController::class, 'refineStep'])->name('studio.plan.refine-step');
+Route::post('/studio/plan/{plan}/step/{order}/confirm',    [StudioController::class, 'confirmStep'])->name('studio.plan.step.confirm');
 
     // Phase 3 — Execution
-    Route::post('/plan/{plan}/dispatch',                [StudioController::class, 'dispatch'])->name('plan.dispatch');
-    Route::post('/plan/{plan}/queue',                   [StudioController::class, 'queuePlan'])->name('plan.queue');
-    Route::post('/plan/{plan}/dispatch-from-queue',     [StudioController::class, 'dispatchFromQueue'])->name('plan.dispatch-from-queue');
-    Route::get('/plan/{plan}/status',                   [StudioController::class, 'status'])->name('plan.status');
-    Route::post('/plan/{plan}/step/{order}/approve',    [StudioController::class, 'approveStep'])->name('plan.step.approve');
-    Route::post('/plan/{plan}/step/{order}/reject',     [StudioController::class, 'rejectStep'])->name('plan.step.reject');
+Route::get('/studio/plan/{plan}/review',                   [StudioController::class, 'review'])->name('studio.plan.review');
+Route::post('/studio/plan/{plan}/dispatch',                [StudioController::class, 'dispatch'])->name('studio.plan.dispatch');
+Route::post('/studio/plan/{plan}/queue',                   [StudioController::class, 'queuePlan'])->name('studio.plan.queue');
+Route::post('/studio/plan/{plan}/dispatch-from-queue',     [StudioController::class, 'dispatchFromQueue'])->name('studio.plan.dispatch-from-queue');
+Route::get('/studio/plan/{plan}/status',                   [StudioController::class, 'status'])->name('studio.plan.status');
+Route::post('/studio/plan/{plan}/step/{order}/approve',    [StudioController::class, 'approveStep'])->name('studio.plan.step.approve');
+Route::post('/studio/plan/{plan}/step/{order}/reject',     [StudioController::class, 'rejectStep'])->name('studio.plan.step.reject');
 
-    // Jobs panel — all session jobs
-    Route::get('/jobs',                                 [StudioController::class, 'jobs'])->name('jobs');
-    Route::get('/queue-status',                         [StudioController::class, 'queueStatus'])->name('queue-status');
-    Route::post('/queue/run-next',                      [StudioController::class, 'runNextInQueue'])->name('queue.run-next');
-    Route::post('/plan/{plan}/mood-board',              [StudioController::class, 'saveMoodBoard'])->name('plan.mood-board');
+// Jobs panel — all session jobs
+Route::get('/studio/jobs',                                 [StudioController::class, 'jobs'])->name('studio.jobs');
+Route::get('/studio/queue-status',                         [StudioController::class, 'queueStatus'])->name('studio.queue-status');
+Route::post('/studio/queue/run-next',                      [StudioController::class, 'runNextInQueue'])->name('studio.queue.run-next');
+Route::post('/studio/plan/{plan}/mood-board',              [StudioController::class, 'saveMoodBoard'])->name('studio.plan.mood-board');
 
     // File upload
-    Route::post('/upload', [StudioController::class, 'upload'])->name('upload');
-});
+Route::post('/studio/upload', [StudioController::class, 'upload'])->name('upload');
+// Workflow confirmation (after LLM classification + template generation) 
+
+Route::post('/studio/workflow/confirm', [StudioController::class, 'confirmWorkflow'])->name('studio.workflow.confirm');
 
 // ─── Admin ────────────────────────────────────────────────────────────────────
 Route::prefix('admin')->name('admin.')->group(function () {

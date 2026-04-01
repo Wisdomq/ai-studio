@@ -144,4 +144,18 @@ class WorkflowPlanStep extends Model
 
         return Storage::disk('public')->url($this->output_path);
     }
+
+    /**
+     * Returns direct asset URL bypassing storage disk URL generation.
+     * Use this if Storage::url() isn't working (e.g. missing symlink).
+     */
+    public function assetUrl(): ?string
+    {
+        if (! $this->output_path) {
+            return null;
+        }
+
+        $baseUrl = rtrim(config('app.url', 'http://localhost'), '/');
+        return $baseUrl . '/storage/' . ltrim($this->output_path, '/');
+    }
 }

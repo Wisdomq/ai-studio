@@ -291,7 +291,11 @@ class AdminController extends Controller
 
         $json = trim($request->workflow_json);
 
-        // Validate JSON
+        // Normalize placeholders: convert unquoted {{PLACEHOLDER}} to quoted "{{PLACEHOLDER}}"
+        // This makes the JSON valid for database storage while preserving the placeholders
+        $json = $this->normalizePlaceholders($json);
+
+        // Validate the normalized JSON
         $decoded = json_decode($json, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
             return response()->json([
@@ -314,7 +318,7 @@ class AdminController extends Controller
             'type'          => $request->type,
             'output_type'   => $request->output_type,
             'description'   => $request->description,
-            'workflow_json' => $json,
+            'workflow_json' => $json,  // original — placeholders preserved
             'input_types'   => $request->input_types ?? [],
             'inject_keys'   => $request->inject_keys ?? [],
             'is_active'     => false,
@@ -367,6 +371,79 @@ class AdminController extends Controller
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Normalize placeholders in workflow JSON: convert unquoted {{PLACEHOLDER}}
+     * to quoted "{{PLACEHOLDER}}" so the JSON is valid for database storage.
+     *
+     * Unquoted placeholders like:
+     *   "seed": {{SEED}}
+     * become:
+     *   "seed": "{{SEED}}"
+     *
+     * This allows the JSON to be stored in the database while still being
+     * replaceable at runtime by injectPrompt().
+     */
+    protected function normalizePlaceholders(string $json): string
+    {
+        // Strip any Blade-escape @ prefix the user may have typed (e.g. @{{SEED}} → {{SEED}})
+        // This keeps the rest of the logic uniform.
+        $json = preg_replace('/@(\{\{[A-Z_]+\}\})/', '$1', $json);
+
+        $placeholders = [
+            '{{PROMPT}}', '{{POSITIVE_PROMPT}}', '{{NEGATIVE_PROMPT}}',
+            '{{SEED}}', '{{STEPS}}', '{{CFG}}', '{{WIDTH}}', '{{HEIGHT}}',
+            '{{FRAME_COUNT}}', '{{FPS}}', '{{MOTION_STRENGTH}}', '{{DURATION}}',
+            '{{SAMPLE_RATE}}', '{{DENOISE}}',
+            '{{INPUT_IMAGE}}', '{{INPUT_VIDEO}}', '{{INPUT_AUDIO}}',
+        ];
+
+        foreach ($placeholders as $placeholder) {
+            // Match unquoted placeholder: colon + whitespace + placeholder + comma/brace
+            // Must NOT be already quoted (no quote before colon, and placeholder not wrapped)
+            $json = preg_replace_callback(
+                '/(?<!")(:)\s*' . preg_quote($placeholder, '/') . '\s*([,\}])/i',
+                function ($matches) use ($placeholder) {
+                    return $matches[1] . ' "' . $placeholder . '" ' . $matches[2];
+                },
+                $json
+            );
+        }
+
+        return $json;
+    }
+
+    /**
+     * Replace numeric injectPrompt placeholders with valid dummy values so that
+     * json_decode() can validate the overall structure without choking on bare
+     * tokens like {{SEED}} that are not valid JSON number literals.
+     *
+     * Only numeric placeholders need this treatment — string placeholders
+     * ({{POSITIVE_PROMPT}}, {{NEGATIVE_PROMPT}}, {{INPUT_IMAGE}}, etc.) sit
+     * inside JSON quoted strings already and are valid as-is.
+     */
+    protected function substituteNumericPlaceholders(string $json): string
+    {
+        $numericPlaceholders = [
+            '{{SEED}}'            => '1',
+            '{{STEPS}}'           => '20',
+            '{{CFG}}'             => '7',
+            '{{WIDTH}}'           => '512',
+            '{{HEIGHT}}'          => '512',
+            '{{FRAME_COUNT}}'     => '16',
+            '{{FPS}}'             => '8',
+            '{{MOTION_STRENGTH}}' => '127',
+            '{{DURATION}}'        => '10',
+            '{{SAMPLE_RATE}}'     => '44100',
+            '{{DENOISE}}'         => '1',
+        ];
+
+        return str_replace(
+            array_keys($numericPlaceholders),
+            array_values($numericPlaceholders),
+            $json
+        );
+    }
 
     /**
      * ComfyUI saves workflows in "graph format" with extra metadata.
