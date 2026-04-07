@@ -5,6 +5,15 @@
         <span class="text-xs font-semibold text-forest-600 uppercase tracking-widest px-2">Generating</span>
         <div class="h-px flex-1 bg-forest-100"></div>
     </div>
+    <div id="orphaned-notice" class="hidden bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-center gap-3">
+        <svg class="w-5 h-5 text-blue-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <div>
+            <p class="text-sm font-medium text-blue-700">Some jobs are still running</p>
+            <p class="text-xs text-blue-600 mt-0.5">The generation is taking longer than expected. We'll notify you when it's done.</p>
+        </div>
+    </div>
     <div id="execution-steps" class="space-y-4"></div>
 
     {{-- Continue creating button (shown after dispatch) --}}

@@ -167,6 +167,10 @@
                             <option value="image_to_video">Image → Video</option>
                             <option value="video_to_video">Video → Video</option>
                             <option value="avatar_video">Talking Avatar</option>
+                            <option value="image_to_image">Image → Image</option>
+                            <option value="audio_to_video">Audio → Video</option>
+                            <option value="audio_to_audio">Audio → Audio</option>
+                            <option value="text_to_speech">Text → Speech</option>
                         </select>
                     </div>
                     <div>

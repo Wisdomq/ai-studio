@@ -60,6 +60,37 @@ services:
       retries: 3
       timeout: 5s
 
+  # ── ComfyUI MCP Sidecar ────────────────────────────────────────────────────
+  # Lightweight Python MCP server (joenorton/comfyui-mcp-server).
+  # Provides: workflow auto-discovery (list_workflows), job submission via MCP
+  # protocol (run_workflow), and asset provenance (asset_id).
+  #
+  # Feature-flagged: COMFYUI_MCP_ENABLED controls whether Laravel routes
+  # job submissions through this service or directly to ComfyUI.
+  # The service always starts so workflow:sync can run regardless of the flag.
+  #
+  # Workflow JSON files: drop into ./comfyui-mcp-server/workflows/ on the host.
+  # The bind mount makes them immediately available without rebuilding.
+  comfyui-mcp:
+    build:
+      context: ./comfyui-mcp-server
+      dockerfile: Dockerfile
+    environment:
+      COMFYUI_URL: 'http://172.16.10.13:8188'
+      MCP_HOST: '0.0.0.0'
+      FASTMCP_HOST: '0.0.0.0'
+      HOST: '0.0.0.0'
+    ports:
+      - '${COMFYUI_MCP_PORT:-9000}:9000'
+    volumes:
+      # Bind-mount the workflows directory so JSON files can be added without rebuild
+      - './comfyui-mcp-server/workflows:/app/workflows'
+    networks:
+      - sail
+    restart: unless-stopped
+    # No depends_on — MCP server connects to ComfyUI on 172.16.10.11 (external host)
+    # and can start independently of the Laravel stack.
+
 networks:
   sail:
     driver: bridge

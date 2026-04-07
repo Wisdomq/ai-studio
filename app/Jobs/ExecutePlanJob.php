@@ -20,8 +20,8 @@ class ExecutePlanJob implements ShouldQueue
     public int $timeout = 3600;
     public int $tries   = 1;
 
-    protected const POLL_INTERVAL_SECONDS    = 5;
-    protected const DEADLINE_BUFFER_SECONDS  = 60;
+    protected const POLL_INTERVAL_SECONDS   = 5;
+    protected const DEADLINE_BUFFER_SECONDS = 60;
 
     public function __construct(public readonly int $planId) {}
 
@@ -75,7 +75,8 @@ class ExecutePlanJob implements ShouldQueue
     {
         while (true) {
             if (time() >= $deadline) {
-                throw new \RuntimeException("Plan #{$plan->id} exceeded timeout.");
+                $this->handleTimeout($plan);
+                return;
             }
 
             $plan->load('steps.workflow');
@@ -92,6 +93,18 @@ class ExecutePlanJob implements ShouldQueue
                 throw new \RuntimeException("Step {$failed->step_order} failed: {$failed->error_message}");
             }
 
+            $cancelled = $steps->first(fn (WorkflowPlanStep $s) => $s->isCancelled());
+            if ($cancelled) {
+                throw new \RuntimeException("Step {$cancelled->step_order} was cancelled by the user.");
+            }
+
+            // Check for orphaned steps - skip them, they have comfy_job_id
+            $orphaned = $steps->first(fn (WorkflowPlanStep $s) => $s->isOrphaned());
+            if ($orphaned) {
+                Log::info("ExecutePlanJob: Found orphaned step {$orphaned->step_order}, skipping to next");
+                continue;
+            }
+
             // Find next pending step whose dependencies are met
             $next = $steps->first(function (WorkflowPlanStep $s) use ($plan) {
                 return $s->isPending() && $s->isReady($plan);
@@ -105,6 +118,32 @@ class ExecutePlanJob implements ShouldQueue
             // No step ready — waiting for approval or dependency
             sleep(self::POLL_INTERVAL_SECONDS);
         }
+    }
+
+    /**
+     * Handle soft timeout - mark running steps as orphaned instead of failing.
+     * The job is already submitted to ComfyUI, so it will complete in background.
+     */
+    protected function handleTimeout(WorkflowPlan $plan): void
+    {
+        Log::warning("ExecutePlanJob: Plan #{$plan->id} reached soft timeout, marking running steps as orphaned");
+
+        $plan->load('steps');
+        
+        $plan->steps
+            ->where('status', WorkflowPlanStep::STATUS_RUNNING)
+            ->each(function (WorkflowPlanStep $step) {
+                if ($step->comfy_job_id) {
+                    $step->markOrphaned();
+                    Log::info("ExecutePlanJob: Step {$step->step_order} marked as orphaned (ComfyUI job: {$step->comfy_job_id})");
+                } else {
+                    // Step was submitted but no job ID - mark as failed
+                    $step->markFailed('Job timed out before submission to ComfyUI');
+                }
+            });
+
+        // Don't mark plan as failed - it's still potentially running
+        Log::info("ExecutePlanJob: Plan #{$plan->id} handling complete - orphaned steps will be picked up by background monitor");
     }
 
     // ── Step execution ────────────────────────────────────────────────────────
@@ -126,7 +165,7 @@ class ExecutePlanJob implements ShouldQueue
             // Upload dependency files to ComfyUI via MCP
             $comfyInputFiles = [];
             foreach ($inputFiles as $mediaType => $storagePath) {
-                $comfyFilename              = $mcp->uploadInputFile($storagePath, $mediaType);
+                $comfyFilename               = $mcp->uploadInputFile($storagePath, $mediaType);
                 $comfyInputFiles[$mediaType] = $comfyFilename;
                 Log::info("ExecutePlanJob: Uploaded {$mediaType} → {$comfyFilename}");
             }
@@ -142,14 +181,35 @@ class ExecutePlanJob implements ShouldQueue
                 'prompt_preview' => substr($step->refined_prompt ?? $step->purpose, 0, 80),
             ]);
 
-            // Submit to ComfyUI via MCP
-            $jobId = $mcp->submitJob($injectedJson);
-            $step->update(['comfy_job_id' => $jobId]);
+            // ── Submit via McpService::mcpSubmitJob() ─────────────────────────
+            // When COMFYUI_MCP_ENABLED=true  → routes through MCP sidecar,
+            //                                  returns asset_id for provenance.
+            // When COMFYUI_MCP_ENABLED=false → falls back to direct submitJob(),
+            //                                  asset_id is null.
+            $submission = $mcp->mcpSubmitJob($injectedJson);
+            $jobId      = $submission['prompt_id'];
+            $assetId    = $submission['asset_id'];
 
-            Log::info("ExecutePlanJob: Step {$step->step_order} → ComfyUI job {$jobId}");
+            // Persist both identifiers immediately — before polling starts —
+            // so cancel_job can reference comfy_job_id even if polling times out.
+            $step->update([
+                'comfy_job_id' => $jobId,
+                'mcp_asset_id' => $assetId,
+            ]);
+
+            Log::info("ExecutePlanJob: Step {$step->step_order} → ComfyUI job {$jobId}", [
+                'asset_id' => $assetId,
+            ]);
 
             // Poll until ComfyUI completes the job
             $storagePath = $this->pollUntilComplete($jobId, $mcp, $deadline);
+
+            // Free VRAM immediately after the generation finishes.
+            // The output file is already saved to storage, so models are safe
+            // to unload now. Freeing here rather than at step start means VRAM
+            // is released during the (potentially long) user approval wait,
+            // preventing OOM when the next step loads different model weights.
+            $this->freeVram($mcp, $step->step_order);
 
             // Mark awaiting approval — pause for user review
             $step->markAwaitingApproval($storagePath);
@@ -171,6 +231,10 @@ class ExecutePlanJob implements ShouldQueue
      * then retrieve the result via McpService::getJobResult() and return the
      * storage-relative path of the primary output file.
      *
+     * Polling always goes direct to ComfyUI via checkJobStatus() / getJobResult()
+     * regardless of COMFYUI_MCP_ENABLED — the MCP server has no polling advantage
+     * over our existing direct implementation.
+     *
      * McpService::checkJobStatus() returns:
      *   ['status' => 'queued'|'running'|'completed'|'failed', 'queue_position' => int|null, ...]
      *
@@ -186,12 +250,12 @@ class ExecutePlanJob implements ShouldQueue
 
             $status = $mcp->checkJobStatus($jobId);
 
-            Log::debug("ExecutePlanJob: Job {$jobId} status: {$status['status']}");
+            Log::debug("ExecutePlanJob: Job {$jobId} status: {$status['status']}", [
+                'queue_position' => $status['queue_position'] ?? null,
+            ]);
 
             if ($status['status'] === 'completed') {
-                // Retrieve and download the output file
-                $result = $mcp->getJobResult($jobId);
-
+                $result      = $mcp->getJobResult($jobId);
                 $storagePath = $result['storage_path'] ?? null;
 
                 if (! $storagePath) {
@@ -216,6 +280,7 @@ class ExecutePlanJob implements ShouldQueue
      * Wait for user to approve or reject the step output.
      * On approval: return (outer loop continues to next step).
      * On rejection: wait for re-refinement then return (outer loop re-executes).
+     * On cancellation: throws so the plan is marked failed cleanly.
      */
     protected function waitForApproval(WorkflowPlanStep $step, WorkflowPlan $plan, int $deadline): void
     {
@@ -231,6 +296,10 @@ class ExecutePlanJob implements ShouldQueue
             if ($step->isCompleted()) {
                 Log::info("ExecutePlanJob: Step {$step->step_order} approved.");
                 return;
+            }
+
+            if ($step->isCancelled()) {
+                throw new \RuntimeException("Step {$step->step_order} cancelled during approval wait.");
             }
 
             if ($step->isPending()) {
@@ -282,66 +351,120 @@ class ExecutePlanJob implements ShouldQueue
         }
     }
 
+    // ── VRAM management ───────────────────────────────────────────────────────
+
+    /**
+     * Ask ComfyUI to unload all models and free GPU memory after a step completes.
+     *
+     * This is intentionally non-fatal: a failed free call is logged as a warning
+     * but never propagates as an exception. The plan continues regardless — a
+     * failed free means the next step may have less VRAM available, but failing
+     * the entire plan over a cleanup call would be worse.
+     */
+    protected function freeVram(McpService $mcp, int $stepOrder): void
+    {
+        try {
+            $result = $mcp->freeVram();
+
+            if ($result['freed']) {
+                Log::info("ExecutePlanJob: VRAM freed after step {$stepOrder}.");
+            } else {
+                Log::warning("ExecutePlanJob: VRAM free returned non-success after step {$stepOrder}.", [
+                    'error' => $result['error'] ?? 'unknown',
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("ExecutePlanJob: VRAM free threw after step {$stepOrder} — continuing.", [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     // ── Dependency file collection ────────────────────────────────────────────
 
+    /**
+     * Collect all input files for a step from three sources:
+     *   1. Step-level upload  — $step->input_file_path (set via refinement phase)
+     *   2. Plan-level uploads — $plan->input_files[] (attached during plan creation)
+     *   3. Dependency outputs — prior steps that this step depends on
+     *
+     * Returns map of media_type => storage-relative path.
+     * Files are NOT uploaded here — the caller (executeStep) handles ComfyUI upload.
+     *
+     * @return array<string, string>  e.g. ['image' => 'comfyui-inputs/foo.png', 'video' => '...']
+     */
     protected function collectDependencyFiles(WorkflowPlanStep $step, WorkflowPlan $plan): array
     {
-        $files      = [];
-        $injectKeys = $step->workflow->inject_keys ?? [];
+        $files = [];
 
-        // ── 1. User-uploaded input file (supplied during refinement phase) ────
-        // This handles workflows like image_to_video / face_swap where the user
-        // provides a source file from the start, not from a prior step's output.
-        $inputFilePath = $step->input_file_path;
-
-        // If no step-level input file, check plan-level input_files (from planning phase)
-        if (empty($inputFilePath)) {
-            $planInputFiles = $plan->input_files ?? [];
-            $workflowInputTypes = $step->workflow->input_types ?? [];
-
-            foreach ($planInputFiles as $file) {
-                $mediaType = $file['media_type'] ?? null;
-                if ($mediaType && in_array($mediaType, $workflowInputTypes)) {
-                    $inputFilePath = $file['storage_path'];
-                    break;
-                }
+        // ── 1a. Step-level multi-input map (new column — preferred) ────────────
+        // {"image": "comfyui-inputs/a.png", "audio": "comfyui-inputs/b.mp3"}
+        foreach ($step->input_files ?? [] as $mediaType => $path) {
+            if (Storage::disk('public')->exists($path)) {
+                $files[$mediaType] = $path;
+                Log::info("ExecutePlanJob: Step-level {$mediaType} input (input_files) → {$path}");
+            } else {
+                throw new \RuntimeException("Step input file missing [{$mediaType}]: {$path}");
             }
         }
 
-        if (! empty($inputFilePath)) {
-            if (! Storage::disk('public')->exists($inputFilePath)) {
-                throw new \RuntimeException(
-                    "User-uploaded input file missing: {$inputFilePath}"
-                );
+        // ── 1b. Legacy single-file column — only if input_files didn't already
+        //        supply a file for this media type (backward compat, not overwritten)
+        if (empty($files) && ! empty($step->input_file_path)) {
+            $path = $step->input_file_path;
+            if (Storage::disk('public')->exists($path)) {
+                $mediaType        = $this->mediaTypeFromPath($path);
+                $files[$mediaType] = $path;
+                Log::info("ExecutePlanJob: Step-level input (legacy input_file_path) → {$path}");
+            } else {
+                throw new \RuntimeException("Step input file missing: {$path}");
             }
-
-            // Determine media type from file extension
-            $ext       = strtolower(pathinfo($inputFilePath, PATHINFO_EXTENSION));
-            $mediaType = match (true) {
-                in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif']) => 'image',
-                in_array($ext, ['mp4', 'webm', 'mov'])                => 'video',
-                in_array($ext, ['mp3', 'wav', 'ogg', 'flac'])         => 'audio',
-                default                                                => 'image',
-            };
-
-            $files[$mediaType] = $inputFilePath;
-            Log::info("ExecutePlanJob: User-uploaded {$mediaType} input → {$inputFilePath}");
         }
 
-        // ── 2. Dependency outputs from prior steps ────────────────────────────
+        // ── 2. Plan-level uploads (attached during plan approval) ───────────────
+        $planInputFiles     = $plan->input_files ?? [];
+        $workflowInputTypes = $step->workflow->input_types ?? [];
+
+        foreach ($planInputFiles as $file) {
+            $mediaType   = $file['media_type'] ?? null;
+            $storagePath = $file['storage_path'] ?? null;
+
+            if (! $mediaType || ! $storagePath) {
+                continue;
+            }
+
+            if (! in_array($mediaType, $workflowInputTypes, true)) {
+                continue;
+            }
+
+            if (isset($files[$mediaType])) {
+                continue; // Step-level upload takes priority
+            }
+
+            if (Storage::disk('public')->exists($storagePath)) {
+                $files[$mediaType] = $storagePath;
+                Log::info("ExecutePlanJob: Plan-level {$mediaType} input → {$storagePath}");
+            } else {
+                throw new \RuntimeException("Plan input file missing: {$storagePath}");
+            }
+        }
+
+        // ── 3. Dependency outputs from prior steps ─────────────────────────────
         foreach ($step->depends_on ?? [] as $depOrder) {
             $dep = $plan->steps->firstWhere('step_order', $depOrder);
 
-            if (! $dep || ! $dep->output_path) {
+            if (! $dep) {
+                throw new \RuntimeException("Dependency step {$depOrder} not found for step {$step->step_order}");
+            }
+
+            if (! $dep->output_path) {
                 throw new \RuntimeException(
                     "Dependency step {$depOrder} has no output. Cannot execute step {$step->step_order}."
                 );
             }
 
             if (! Storage::disk('public')->exists($dep->output_path)) {
-                throw new \RuntimeException(
-                    "Dependency output file missing: {$dep->output_path}"
-                );
+                throw new \RuntimeException("Dependency output file missing: {$dep->output_path}");
             }
 
             $depOutputType = $dep->workflow->output_type ?? null;
@@ -349,12 +472,29 @@ class ExecutePlanJob implements ShouldQueue
                 continue;
             }
 
-            $placeholder           = $injectKeys[$depOutputType] ?? '{{INPUT_FILE}}';
-            $files[$depOutputType] = $dep->output_path;
+            if (isset($files[$depOutputType])) {
+                continue; // Step-level or plan-level upload already covers this type
+            }
 
-            Log::info("ExecutePlanJob: Dependency step {$depOrder} ({$depOutputType}) → placeholder {$placeholder}");
+            $files[$depOutputType] = $dep->output_path;
+            Log::info("ExecutePlanJob: Dependency step {$depOrder} output → {$depOutputType}: {$dep->output_path}");
         }
 
         return $files;
+    }
+
+    /**
+     * Infer media type from a file path extension.
+     */
+    protected function mediaTypeFromPath(string $path): string
+    {
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        return match (true) {
+            in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff']) => 'image',
+            in_array($ext, ['mp4', 'webm', 'mov', 'avi', 'mkv'])                 => 'video',
+            in_array($ext, ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a'])          => 'audio',
+            default                                                                   => 'image',
+        };
     }
 }

@@ -27,7 +27,7 @@ class WorkflowBuilderSkill
 {
     protected string $model;
 
-    public function __construct(string $model = 'mistral:7b ')
+    public function __construct(string $model = 'mistral:7b')
     {
         $this->model = $model;
     }

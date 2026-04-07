@@ -21,6 +21,7 @@ document.getElementById('btn-dispatch').addEventListener('click', async () => {
     document.getElementById('phase-execution').classList.remove('hidden');
     renderExecutionSteps();
     startPolling();
+    startQueueStatusPolling();
     setTimeout(() => document.getElementById('btn-continue-creating').classList.remove('hidden'), 3000);
     setTimeout(() => toggleMoodBoard(true), 5000);
 });
@@ -38,6 +39,7 @@ document.getElementById('btn-add-to-queue').addEventListener('click', async () =
             document.getElementById('phase-execution').classList.remove('hidden');
             renderExecutionSteps();
             startPolling();
+            startQueueStatusPolling();
         } else {
             appendMessage('assistant', `Added to queue (position ${data.queue_position}). You can start a new generation now!`);
         }
@@ -62,7 +64,7 @@ function renderExecutionSteps() {
     });
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
+// ── Step polling ──────────────────────────────────────────────────────────────
 
 function startPolling() {
     pollInterval = setInterval(pollStatus, 4000);
@@ -73,9 +75,15 @@ async function pollStatus() {
     try {
         const resp = await fetch(`${STUDIO_ROUTES.planBase}/${currentPlanId}/status`);
         const data = await resp.json();
+        
+        const hasOrphaned = data.steps.some(s => s.status === 'orphaned');
+        const noticeEl = document.getElementById('orphaned-notice');
+        if (noticeEl) {
+            noticeEl.classList.toggle('hidden', !hasOrphaned);
+        }
+        
         data.steps.forEach(step => {
             updateExecStep(step);
-            // Cache the storage path so approveStep() can attach it to dependents
             if (step.output_path) {
                 stepOutputPaths[step.step_order] = step.output_path;
             }
@@ -83,6 +91,7 @@ async function pollStatus() {
 
         if (data.status === 'completed') {
             clearInterval(pollInterval);
+            stopQueueStatusPolling();
             showProgress(false);
             setPhase('Complete! ✓');
             refreshJobsPanel();
@@ -90,6 +99,7 @@ async function pollStatus() {
         }
         if (data.status === 'failed') {
             clearInterval(pollInterval);
+            stopQueueStatusPolling();
             showProgress(false);
             setPhase('Generation failed');
             refreshJobsPanel();
@@ -103,6 +113,22 @@ function updateExecStep(step) {
     if (!el) return;
     updateStepBadge(el, step.status);
 
+    // Show/hide cancel button based on status
+    const cancelBtn = el.querySelector('.btn-cancel-step');
+    if (cancelBtn) {
+        if (step.status === 'running') {
+            cancelBtn.classList.remove('hidden');
+            cancelBtn.classList.add('flex');
+            if (!cancelBtn.dataset.wired) {
+                cancelBtn.dataset.wired = '1';
+                cancelBtn.addEventListener('click', () => cancelStep(step.step_order));
+            }
+        } else {
+            cancelBtn.classList.add('hidden');
+            cancelBtn.classList.remove('flex');
+        }
+    }
+
     if (step.status === 'awaiting_approval' && step.output_url) {
         const resultDiv = el.querySelector('.step-result');
         const mediaWrap = el.querySelector('.step-media-wrap');
@@ -113,11 +139,17 @@ function updateExecStep(step) {
             el.querySelector('.btn-reject-step').addEventListener('click', () => rejectStep(step.step_order));
         }
     }
+
+    if (step.status === 'cancelled') {
+        el.querySelector('.step-cancelled')?.classList.remove('hidden');
+        el.querySelector('.step-result')?.classList.add('hidden');
+        el.querySelector('.step-error')?.classList.add('hidden');
+    }
+
     if (step.status === 'failed' && step.error_message) {
-        const errDiv = el.querySelector('.step-error');
         el.querySelector('.step-error-text').textContent = step.error_message;
-        errDiv.classList.remove('hidden');
-        const retryBtn = errDiv.querySelector('.btn-retry-step');
+        el.querySelector('.step-error').classList.remove('hidden');
+        const retryBtn = el.querySelector('.btn-retry-step');
         if (retryBtn && !retryBtn.dataset.wired) {
             retryBtn.dataset.wired = '1';
             retryBtn.addEventListener('click', () => retryPlan());
@@ -128,7 +160,7 @@ function updateExecStep(step) {
 function renderMedia(container, url) {
     const ext = url.split('.').pop().toLowerCase();
     let el;
-    if (['mp4','webm','mov'].includes(ext))        { el = document.createElement('video'); el.controls = true; el.className = 'w-full max-h-96 object-contain bg-black'; }
+    if (['mp4','webm','mov'].includes(ext))            { el = document.createElement('video'); el.controls = true; el.className = 'w-full max-h-96 object-contain bg-black'; }
     else if (['mp3','wav','ogg','flac'].includes(ext)) { el = document.createElement('audio'); el.controls = true; el.className = 'w-full p-4'; }
     else                                               { el = document.createElement('img');  el.alt = 'Generated output'; el.className = 'w-full max-h-96 object-contain'; }
     el.src = url;
@@ -145,10 +177,41 @@ function updateStepBadge(el, status) {
         awaiting_approval: ['Review Required', 'badge-approval'],
         completed:         ['Approved \u2713', 'badge-completed'],
         failed:            ['Failed',          'badge-failed'],
+        cancelled:         ['Cancelled',       'badge-cancelled'],
+        orphaned:          ['Still Running',   'badge-orphaned'],
     };
     const [label, cls] = map[status] ?? ['Unknown', 'badge-pending'];
     badge.textContent = label;
     badge.className   = `step-badge text-xs px-2.5 py-1 rounded-full font-medium ${cls}`;
+}
+
+// ── Cancel step ───────────────────────────────────────────────────────────────
+
+async function cancelStep(stepOrder) {
+    if (!confirm('Cancel this generation step?')) return;
+
+    const el        = document.getElementById(`exec-step-${stepOrder}`);
+    const cancelBtn = el?.querySelector('.btn-cancel-step');
+    if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling…'; }
+
+    try {
+        const resp = await fetch(`${STUDIO_ROUTES.planBase}/${currentPlanId}/step/${stepOrder}/cancel`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF_TOKEN },
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            updateStepBadge(el, 'cancelled');
+            if (cancelBtn) { cancelBtn.classList.add('hidden'); cancelBtn.classList.remove('flex'); }
+            el?.querySelector('.step-cancelled')?.classList.remove('hidden');
+        } else {
+            if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+            console.warn('Cancel failed:', data.error);
+        }
+    } catch (e) {
+        if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+    }
 }
 
 // ── Approve / reject step ─────────────────────────────────────────────────────
@@ -165,27 +228,26 @@ async function approveStep(stepOrder) {
     el.querySelector('.step-result').classList.add('hidden');
 
     // ── Auto-attach this step's output to any dependent steps ────────────────
-    // Find the output_url for this step from the last polled status, then
-    // POST it as input_file_path to all steps that depend on this step_order.
-    // This ensures ExecutePlanJob has the file path available when it picks
-    // up the next step — without requiring the user to manually re-upload.
+    // Each dependent step receives the output keyed by this step's output_type
+    // so multi-input workflows accumulate files from multiple upstream steps
+    // without overwriting each other (confirmStep() merges on the backend).
     const dependentSteps = (currentPlan || []).filter(s =>
         Array.isArray(s.depends_on) && s.depends_on.includes(stepOrder)
     );
 
     if (dependentSteps.length > 0) {
-        // Retrieve the output path from the step's cached status
-        // (stored in lastPollData which we maintain below)
         const outputStoragePath = stepOutputPaths[stepOrder] ?? null;
+        // output_type is injected by approvePlan() — tells us what media type this step produced
+        const outputMediaType   = (currentPlan || []).find(s => s.step_order === stepOrder)?.output_type ?? null;
 
-        if (outputStoragePath) {
+        if (outputStoragePath && outputMediaType) {
             await Promise.all(dependentSteps.map(dep =>
                 fetch(`${STUDIO_ROUTES.planBase}/${currentPlanId}/step/${dep.step_order}/confirm`, {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF_TOKEN },
                     body:    JSON.stringify({
-                        refined_prompt:  dep.refined_prompt || dep.purpose || dep.prompt_hint || '',
-                        input_file_path: outputStoragePath,
+                        // No refined_prompt — confirmStep() skips it when already set
+                        input_files: { [outputMediaType]: outputStoragePath },
                     }),
                 })
             ));
@@ -194,46 +256,106 @@ async function approveStep(stepOrder) {
 }
 
 async function rejectStep(stepOrder) {
+    const reason = window.prompt('What was wrong with the result? (optional - Press Ok to skip)',
+        ''
+    ) ?? '';
     const resp = await fetch(`${STUDIO_ROUTES.planBase}/${currentPlanId}/step/${stepOrder}/reject`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF_TOKEN },
+        body:    JSON.stringify({ rejection_reason: reason.trim() || null }),
     });
-    if (!resp.ok) return;
+    if (!resp.ok){
+        console.error ('Reject step failed', await resp.text());
+        return;
+    }
 
-    const el = document.getElementById(`exec-step-${stepOrder}`);
-    el.querySelector('.step-result').classList.add('hidden');
-    updateStepBadge(el, 'pending');
+    const data = await resp.json();
+
+    //data now contains : success, step_order, status, purpose, user_intent, rejection_reason.
+    //Use it to rebuild a grounded redo seed-prevents hallucination on re-entry.
+
+    const userIntent = data.user_intent
+        ?? conversationHistory.filter(m=>m.role === 'user').map(m=>m.content).join('').trim();
+
+    // Look up the step from currentPlan — planStepData is not a valid variable here.
+    const planStep = (currentPlan || []).find(s => s.step_order === stepOrder) ?? {};
+
+    reinitialiseStepForRedo(
+        stepOrder,
+        data.purpose ?? planStep.purpose ?? '',
+        userIntent,
+        data.rejection_reason ?? null
+    );
+
+    // Show a brief message explaining the redo before the refinement card appears.
+    const stepPurpose = data.purpose ?? planStep.purpose ?? `Step ${stepOrder + 1}`;
+    const redoMsg = data.rejection_reason
+        ? `Let's refine "${stepPurpose}". You said: "${data.rejection_reason}"`
+        : `Let's refine "${stepPurpose}" and try again.`;
+    appendMessage('assistant', redoMsg);
 
     document.getElementById('phase-execution').classList.add('hidden');
     document.getElementById('phase-refinement').classList.remove('hidden');
 
-    const planStep = currentPlan.find(s => s.step_order === stepOrder);
-    if (!planStep) return;
+    const el = document.getElementById(`exec-step-${stepOrder}`);
+    el.querySelector('.step-result').classList.add('hidden');
+    el.querySelector('.step-media-wrap').innerHTML = '';
+    updateStepBadge(el, 'pending');
 
-    stepRefinementState[stepOrder] = {
-        messages:   [{ role: 'user', content: planStep.prompt_hint || planStep.purpose }],
-        turnNumber: 1,
-        confirmed:  false,
-        stepId:     stepRefinementState[stepOrder]?.stepId,
-    };
-
-    const existing = document.getElementById(`refine-step-${stepOrder}`);
-    if (existing) existing.remove();
-
-    renderRefinementCard(planStep, stepRefinementState[stepOrder].stepId);
+    const enrichedStep = Object.assign({}, planStep, {
+        input_types: planStep.input_types ?? [],
+    });
+    renderRefinementCard(enrichedStep, stepRefinementState[stepOrder]?.stepId, null, []);
     startRefinementStream(stepOrder);
+}
 
-    setTimeout(() => {
-        const card = document.getElementById(`refine-step-${stepOrder}`);
-        if (!card) return;
-        card.querySelector('.btn-confirm-prompt')?.addEventListener('click', () => {
-            setTimeout(() => {
-                document.getElementById('phase-refinement').classList.add('hidden');
-                document.getElementById('phase-execution').classList.remove('hidden');
-                updateStepBadge(document.getElementById(`exec-step-${stepOrder}`), 'pending');
-            }, 500);
-        }, { once: true });
-    }, 100);
+
+// ── Queue status polling ──────────────────────────────────────────────────────
+// Polls /studio/queue-status every 10s while in execution phase.
+// Shows "N jobs ahead of yours" in the amber bar when the ComfyUI queue
+// has pending jobs. Hides the bar when the queue is clear or a step is running.
+
+let queueStatusInterval = null;
+
+function startQueueStatusPolling() {
+    queueStatusInterval = setInterval(fetchQueueStatus, 10000);
+    fetchQueueStatus(); // Immediate first check
+}
+
+function stopQueueStatusPolling() {
+    if (queueStatusInterval) {
+        clearInterval(queueStatusInterval);
+        queueStatusInterval = null;
+    }
+    document.getElementById('queue-status-bar')?.classList.add('hidden');
+}
+
+async function fetchQueueStatus() {
+    try {
+        const resp = await fetch(STUDIO_ROUTES.queueStatus);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const bar  = document.getElementById('queue-status-bar');
+        const text = document.getElementById('queue-status-text');
+        if (!bar || !text) return;
+
+        const pending = data.pending ?? 0;
+        const running = data.running ?? 0;
+
+        if (pending > 0) {
+            const jobWord = pending === 1 ? 'job' : 'jobs';
+            text.textContent = `${pending} ${jobWord} ahead of yours in the ComfyUI queue…`;
+            bar.classList.remove('hidden');
+        } else if (running > 0) {
+            // Our job is actively running — no need to show the queue bar
+            bar.classList.add('hidden');
+        } else {
+            bar.classList.add('hidden');
+        }
+    } catch (e) {
+        // Network error — silently ignore, don't break the execution UI
+    }
 }
 
 // ── Retry plan ────────────────────────────────────────────────────────────────
@@ -260,6 +382,7 @@ async function retryPlan() {
         });
         setPhase('Generating...');
         startPolling();
+        startQueueStatusPolling();
     } else {
         showProgress(false);
         setPhase('Generation failed');

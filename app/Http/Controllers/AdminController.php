@@ -15,7 +15,7 @@ class AdminController extends Controller
 
     public function __construct()
     {
-        $this->comfyUrl = rtrim(config('comfyui.base_url', 'http://172.16.10.11:8188'), '/');
+        $this->comfyUrl = rtrim(config('comfyui.base_url', 'http://172.16.10.13:8188'), '/');
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -107,6 +107,8 @@ class AdminController extends Controller
     public function deleteWorkflow(Workflow $workflow): JsonResponse
     {
         $name = $workflow->name;
+
+        $workflow->planSteps()->delete();
         $workflow->delete();
 
         Log::info('AdminController: Workflow deleted', [

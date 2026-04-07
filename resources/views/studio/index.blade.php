@@ -55,6 +55,12 @@
         </a>
 
         <div class="flex items-center gap-3">
+            {{-- ComfyUI Status LED --}}
+            <div id="comfy-status" class="flex items-center gap-1.5" title="Checking ComfyUI...">
+                <span id="comfy-led" class="w-2.5 h-2.5 rounded-full bg-gray-300 transition-colors duration-300"></span>
+                <span id="comfy-label" class="text-xs text-gray-400">ComfyUI</span>
+            </div>
+
             <div id="phase-indicator" class="text-xs font-medium text-forest-600 bg-forest-50 border border-forest-200 px-3 py-1 rounded-full">
                 Ready to create
             </div>
@@ -165,6 +171,43 @@ const STUDIO_ROUTES = {
 // Active workflows injected from PHP — used by the workflows panel and
 // referenced by the planner to show IDs alongside workflow names.
 const STUDIO_WORKFLOWS = @json($workflows ?? []);
+
+// ── ComfyUI Status LED ─────────────────────────────────────────────────────────
+(function() {
+    const led = document.getElementById('comfy-led');
+    const label = document.getElementById('comfy-label');
+    const container = document.getElementById('comfy-status');
+
+    function updateStatus(online) {
+        if (online) {
+            led.className = 'w-2.5 h-2.5 rounded-full bg-blue-500 shadow-sm shadow-blue-500/50';
+            label.className = 'text-xs text-blue-600';
+            label.textContent = 'ComfyUI';
+            container.title = 'ComfyUI: Online';
+        } else {
+            led.className = 'w-2.5 h-2.5 rounded-full bg-red-500 shadow-sm shadow-red-500/50';
+            label.className = 'text-xs text-red-500';
+            label.textContent = 'ComfyUI';
+            container.title = 'ComfyUI: Offline';
+        }
+    }
+
+    async function checkComfyStatus() {
+        try {
+            const resp = await fetch('{{ route("studio.comfy-health") }}');
+            const data = await resp.json();
+            updateStatus(data.reachable === true);
+        } catch {
+            updateStatus(false);
+        }
+    }
+
+    // Check on load
+    checkComfyStatus();
+
+    // Re-check every 30 seconds
+    setInterval(checkComfyStatus, 30000);
+})();
 </script>
 
 <script src="{{ asset('js/studio/studio.js') }}" defer></script>

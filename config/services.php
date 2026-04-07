@@ -37,6 +37,9 @@ return [
      'ollama' => [
         'url' => env('OLLAMA_URL', 'http://172.16.10.11:11435'),
     ],
+    'comfyui_mcp' => [
+        'enabled' => env('COMFYUI_MCP_ENABLED', false),
+        'url'     => env('COMFYUI_MCP_URL', 'http://comfyui-mcp:9000/mcp'),
+    ],
  
-
 ];

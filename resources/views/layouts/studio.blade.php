@@ -138,6 +138,7 @@
         .badge-approval   { background: #f0fdf4; color: #166534; border: 1px solid #86efac; }
         .badge-completed  { background: #dcfce7; color: #166534; border: 1px solid #6ee7b7; }
         .badge-failed     { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+        .badge-orphaned   { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
 
         /* ── Scrollbar ────────────────────────────────────── */
         ::-webkit-scrollbar { width: 6px; }

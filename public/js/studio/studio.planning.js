@@ -414,6 +414,7 @@ function renderMultiPlanCards(plan) {
     plan.forEach((step, i) => {
         const c             = typeColors[step.workflow_type] || typeColors.image;
         const hasDependency = step.depends_on && step.depends_on.length > 0;
+        const dependsOnStep = hasDependency ? step.depends_on[step.depends_on.length - 1] + 1 : null;
 
         const card = document.createElement('div');
         card.id        = `plan-card-step-${step.step_order}`;
@@ -430,7 +431,7 @@ function renderMultiPlanCards(plan) {
                 <div class="text-sm font-medium text-gray-800 mb-2">${step.purpose}</div>
                 <div class="flex items-center gap-2 flex-wrap">
                     <span class="text-xs px-2 py-0.5 rounded-full border font-medium ${c.badge}">${step.workflow_type}</span>
-                    ${hasDependency ? '<span class="text-xs text-forest-600 flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4"/></svg>uses output from step ${i}</span>' : ''}
+                    ${hasDependency ? '<span class="text-xs text-forest-600 flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4"/></svg>uses output from step ' + dependsOnStep + '</span>' : ''}
                 </div>
             </div>
             <div class="px-5 pb-5 flex gap-3">

@@ -93,6 +93,11 @@ STEP 2 — MULTI‑WORKFLOW ORCHESTRATION (fallback — only if STEP 1 found not
         – If none exists → flag the missing step (see STEP 3‑B).
   • If all required steps have existing workflows, return them in execution order:
         READY:<id_step1>,<id_step2>,...
+  • After the READY line, add one INTENT: line per step (in order), each capturing
+    the user's original phrasing for THAT specific step. Extract the exact portion
+    of the user's request that applies to this step. Example:
+        INTENT:Generate an image of a cat walking in the park
+        INTENT:Animate the cat image into a video showing it running
   • If at least one required step is missing → fall‑through to STEP 3‑B instead.
 
 STEP 3‑A — BUILD A NEW WORKFLOW (explicit request)
@@ -120,6 +125,7 @@ STEP 4 — NOTHING FITS
 ════════════════════════════════════════
 SIGNALS — always the very last line of the assistant's output, nothing after it:
   READY:<workflow_id>                (single or comma‑separated list)
+  INTENT:<step‑specific prompt>      (one per step, in order, after READY line)
   AMBIGUOUS:<id1>,<id2>
   CREATE_WORKFLOW:<intent>
 
@@ -310,46 +316,89 @@ SYSPROMPT;
             'response_preview' => substr($rawResponse, -500),
         ]);
 
-        // ── 1. READY signal (single ID or comma-separated list) ───────────────
-        // Use preg_match_all + take the last match so trailing prose is ignored.
-        // Handle cases like "READY:24", "READY:24,5", "READY:ID24", "READY:ID 24"
-        if (preg_match_all('/READY:.*?(\d+(?:,\d+)*)/i', $rawResponse, $allReadyMatches)) {
-            $idString = trim(end($allReadyMatches[1]));
-            $ids      = array_values(array_filter(array_map('intval', explode(',', $idString))));
+        // ── Phase 1: Collect ALL IDs from ALL READY: patterns ──────────────────
+        $allReadyIds = [];
 
-            if (! empty($ids)) {
-                $workflows = Workflow::active()->whereIn('id', $ids)->get();
-                $foundIds  = $workflows->pluck('id')->toArray();
+        if (preg_match_all('/READY:\s*(?:\d+(?:\s*,\s*\d+)*)/i', $rawResponse, $allReadyMatches)) {
+            foreach ($allReadyMatches[0] as $raw) {
+                $clean = preg_replace('/[^0-9,\s]/', '', $raw);
+                $clean = preg_replace('/\s*,\s*/', ',', trim($clean));
+                $chunk = array_values(array_filter(array_map('intval', explode(',', $clean))));
+                $allReadyIds = array_merge($allReadyIds, $chunk);
+            }
+        }
 
-                $missing = array_diff($ids, $foundIds);
-                if (! empty($missing)) {
-                    Log::warning('OrchestratorAgent: READY signal has invalid workflow IDs: ' . implode(',', $missing));
+        // ── Phase 2: If READY signals yielded < 2 IDs, also scan prose ─────────
+        if (count($allReadyIds) < 2) {
+            $proseIds = $this->extractIdsFromProse($rawResponse);
+            $allReadyIds = array_merge($allReadyIds, $proseIds);
+        }
+
+        // ── Phase 3: Preserve order (no deduplication) ───────────────────────
+        // Each occurrence of an ID represents a distinct plan step, even if the
+        // same workflow ID appears multiple times (e.g. READY:1,1,2).
+        $ids = array_values(array_filter($allReadyIds, fn ($id) => $id > 0));
+
+        Log::info('OrchestratorAgent: Collected IDs from LLM response', [
+            'ids' => $ids,
+            'ready_signal_ids' => $allReadyIds,
+        ]);
+
+        // ── Phase 3b: Extract step-specific intents from INTENT: lines ───────
+        // Each INTENT: line captures the user's original phrasing for a specific step.
+        $stepIntents = [];
+        if (preg_match_all('/^INTENT:\s*(.+)$/mi', $rawResponse, $intentMatches)) {
+            foreach ($intentMatches[1] as $intent) {
+                $intent = trim($intent);
+                if (! empty($intent)) {
+                    $stepIntents[] = $intent;
                 }
+            }
+        }
+
+        Log::info('OrchestratorAgent: Extracted step intents', [
+            'step_intents' => $stepIntents,
+        ]);
+
+        // ── Phase 4: Validate against DB ─────────────────────────────────────
+        if (! empty($ids)) {
+            // Get unique IDs for the DB query
+            $uniqueIds = array_values(array_unique($ids));
+            $workflows = Workflow::active()->whereIn('id', $uniqueIds)->get();
+            $foundIds  = $workflows->pluck('id')->toArray();
+
+            $missing = array_diff($uniqueIds, $foundIds);
+            if (! empty($missing)) {
+                Log::warning('OrchestratorAgent: Invalid workflow IDs skipped: ' . implode(',', $missing));
+            }
+
+            if (! empty($foundIds)) {
+                // Re-order to match the LLM's order (preserves pipeline sequence)
+                // Filter to only valid IDs, but preserve ALL occurrences (including duplicates)
+                $orderedWorkflows = collect($ids)
+                    ->filter(fn ($id) => in_array($id, $foundIds))
+                    ->map(fn ($id) => $workflows->firstWhere('id', $id))
+                    ->filter()
+                    ->values();
+
+                $plan = count($orderedWorkflows) > 1
+                    ? $this->buildMultiStepPlan($orderedWorkflows, $conversationMessages, $stepIntents)
+                    : $this->buildPlan($orderedWorkflows->first(), $conversationMessages);
 
                 Log::info('OrchestratorAgent: READY signal detected', [
                     'requested_ids' => $ids,
                     'found_ids'     => $foundIds,
                 ]);
 
-                if (! empty($foundIds)) {
-                    // Re-order to match the LLM's requested order (preserves pipeline sequence)
-                    $orderedWorkflows = collect($ids)
-                        ->filter(fn ($id) => in_array($id, $foundIds))
-                        ->map(fn ($id) => $workflows->firstWhere('id', $id))
-                        ->filter()
-                        ->values();
-
-                    $plan = $this->buildMultiStepPlan($orderedWorkflows, $conversationMessages);
-
-                    return ['type' => 'ready', 'workflow_ids' => $foundIds, 'plan' => $plan];
-                }
+                return ['type' => 'ready', 'workflow_ids' => $foundIds, 'plan' => $plan];
             }
         }
 
         // ── 2. AMBIGUOUS signal ───────────────────────────────────────────────
-        // Handle cases like "AMBIGUOUS:ID24,25"
-        if (preg_match_all('/AMBIGUOUS:.*?(\d+(?:,\d+)*)/i', $rawResponse, $allAmbiguousMatches)) {
-            $idString = trim(end($allAmbiguousMatches[1]));
+        if (preg_match_all('/AMBIGUOUS:\s*(?:\d+(?:\s*,\s*\d+)*)/i', $rawResponse, $allAmbiguousMatches)) {
+            $raw = end($allAmbiguousMatches[0]);
+            $idString = preg_replace('/[^0-9,\s]/', '', $raw);
+            $idString = preg_replace('/\s*,\s*/', ',', trim($idString));
             $ids      = array_values(array_filter(array_map('intval', explode(',', $idString))));
 
             if (! empty($ids)) {
@@ -359,13 +408,9 @@ SYSPROMPT;
         }
 
         // ── 3. CREATE_WORKFLOW signal ─────────────────────────────────────────
-        // Scan the full response for any CREATE_WORKFLOW occurrence, take the last.
         if (preg_match_all('/CREATE_WORKFLOW:?([^\n]*)/i', $rawResponse, $allCwMatches)) {
             $intent = trim(end($allCwMatches[1]));
 
-            // Safety net: if the user's message looks like a generation request
-            // and an existing workflow matches, override to READY rather than
-            // spinning up the workflow builder unnecessarily.
             $userText = '';
             foreach ($conversationMessages as $msg) {
                 if ($msg['role'] === 'user') { $userText = strtolower($msg['content']); break; }
@@ -422,10 +467,60 @@ SYSPROMPT;
         }
 
         // ── 4. No signal found ────────────────────────────────────────────────
-        // Return a distinct 'no_signal' type so the controller can emit a
-        // gentle SSE nudge to the frontend instead of silently doing nothing.
         Log::debug('OrchestratorAgent: No signal found in response');
         return ['type' => 'no_signal', 'workflow_ids' => [], 'plan' => null];
+    }
+
+    /**
+     * Scan response prose for bare workflow ID mentions that weren't caught by
+     * READY: signals. Matches patterns like:
+     *   "workflow 37", "workflow 38", "workflows 37 and 38"
+     *   "ID 37", "step 37", "use 37", "numbers 37, 38"
+     *
+     * Only returns IDs that appear to be part of a plan (near action words).
+     */
+    protected function extractIdsFromProse(string $response): array
+    {
+        $ids = [];
+
+        // Match bare workflow IDs in context: workflow N, workflows N, ID N, step N, use N, numbers N
+        $pattern = '/(?:(?:workflows?|ids?|steps?|use|numbers?)\s*:?\s*)(\d+)(?:\s*(?:,|and|\/)\s*(\d+))*/i';
+
+        if (preg_match_all($pattern, $response, $matches)) {
+            foreach ($matches[0] as $index => $match) {
+                $firstId = (int) $matches[1][$index];
+                if ($firstId > 0) {
+                    $ids[] = $firstId;
+                }
+                // Capture comma/and-separated IDs on the same line
+                if (! empty($matches[2][$index])) {
+                    $extra = (int) $matches[2][$index];
+                    if ($extra > 0) {
+                        $ids[] = $extra;
+                    }
+                }
+            }
+        }
+
+        // Also scan sentence-by-sentence for standalone numbers that look like workflow IDs
+        // (single digits 1-9 or any number near "workflow/step" keywords)
+        $sentences = preg_split('/[.!?\n]+/', $response);
+        foreach ($sentences as $sentence) {
+            $sentence = trim($sentence);
+            if (preg_match_all('/\b(\d{1,4})\b/', $sentence, $numMatches)) {
+                foreach ($numMatches[1] as $num) {
+                    $n = (int) $num;
+                    // Skip single digits (likely list items or counts, not workflow IDs)
+                    // Skip if the sentence doesn't mention a workflow-related keyword
+                    $hasKeyword = preg_match('/\b(?:workflow|step|use|run|execute|generate|animate|create|process)\b/i', $sentence);
+                    if ($n >= 10 && $hasKeyword) {
+                        $ids[] = $n;
+                    }
+                }
+            }
+        }
+
+        return $ids;
     }
 
     // ─── Plan building (PHP-only, no LLM JSON) ────────────────────────────────
@@ -435,7 +530,6 @@ SYSPROMPT;
      */
     public function buildPlan(Workflow $workflow, array $conversationMessages = []): array
     {
-        // Use the LAST user message — this is the current request, not stale history
         $userIntent = $this->extractLastUserIntent($conversationMessages);
 
         return [[
@@ -451,10 +545,13 @@ SYSPROMPT;
     /**
      * Build a multi-step plan from multiple workflows.
      * Each step depends on the previous step's output.
+     *
+     * @param \Illuminate\Support\Collection $workflows Ordered collection of workflows
+     * @param array $conversationMessages Conversation history for extracting user intent
+     * @param array $stepIntents Step-specific intents extracted from LLM INTENT: lines
      */
-    public function buildMultiStepPlan(\Illuminate\Support\Collection $workflows, array $conversationMessages = []): array
+    public function buildMultiStepPlan(\Illuminate\Support\Collection $workflows, array $conversationMessages = [], array $stepIntents = []): array
     {
-        // Use the LAST user message — this is the current request, not stale history
         $userIntent = $this->extractLastUserIntent($conversationMessages);
 
         $plan  = [];
@@ -468,11 +565,9 @@ SYSPROMPT;
             // the prompt), subsequent steps describe their transformation role.
             $purpose = $this->buildMultiStepPurpose($workflow, $userIntent, $index, $total);
 
-            // Per-step prompt_hint: only step 0 pre-fills with the user intent.
-            // Later steps start blank so WorkflowOptimizerAgent can ask the user
-            // what they want for that specific output (e.g. motion style for video)
-            // rather than blindly reusing the previous step's image prompt.
-            $promptHint = $index === 0 ? $userIntent : '';
+            // Per-step prompt_hint: prefer step-specific intent from LLM if available,
+            // fall back to user intent for step 0, then empty for subsequent steps.
+            $promptHint = $stepIntents[$index] ?? ($index === 0 ? $userIntent : '');
 
             $plan[] = [
                 'step_order'    => $index,

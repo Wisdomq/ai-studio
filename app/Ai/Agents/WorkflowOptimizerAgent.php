@@ -218,9 +218,13 @@ SYSPROMPT;
     protected function buildPrismMessages(array $messages): array
     {
         return array_map(function (array $msg) {
+            $content = $msg['content'] ?? '';
+            if ($content === '' || $content === null) {
+                return new UserMessage('[Empty message]');
+            }
             return match ($msg['role']) {
-                'assistant' => new AssistantMessage($msg['content']),
-                default     => new UserMessage($msg['content']),
+                'assistant' => new AssistantMessage($content),
+                default     => new UserMessage($content),
             };
         }, $messages);
     }

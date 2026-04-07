@@ -13,7 +13,7 @@ class WorkflowBuilderService
 
     public function __construct()
     {
-        $this->comfyUrl = config('services.comfyui.url', 'http://172.16.10.11:8188');
+        $this->comfyUrl = config('services.comfyui.url', 'http://172.16.10.13:8188');
     }
 
     /**

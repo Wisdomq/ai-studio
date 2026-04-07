@@ -82,28 +82,24 @@
 
                 @if($step->status === 'awaiting_approval')
                     <div class="px-5 py-4 bg-gray-50 border-t border-gray-100 flex items-center gap-3">
-                        <form action="{{ route('studio.plan.step.approve', ['plan' => $plan->id, 'order' => $step->step_order]) }}" 
-                              method="POST" class="flex-1">
-                            @csrf
-                            <button type="submit" 
-                                    class="w-full py-2.5 px-4 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-semibold transition shadow-sm flex items-center justify-center gap-2">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
-                                </svg>
-                                Approve & Continue
-                            </button>
-                        </form>
-                        <form action="{{ route('studio.plan.step.reject', ['plan' => $plan->id, 'order' => $step->step_order]) }}" 
-                              method="POST" class="flex-1">
-                            @csrf
-                            <button type="submit" 
-                                    class="w-full py-2.5 px-4 bg-white hover:bg-red-50 text-red-600 border border-red-200 hover:border-red-300 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                                </svg>
-                                Request Changes
-                            </button>
-                        </form>
+                        <button type="button" 
+                                class="btn-approve-step flex-1 py-2.5 px-4 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-semibold transition shadow-sm flex items-center justify-center gap-2"
+                                data-plan-id="{{ $plan->id }}"
+                                data-step-order="{{ $step->step_order }}">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                            </svg>
+                            Approve & Continue
+                        </button>
+                        <button type="button"
+                                class="btn-reject-step flex-1 py-2.5 px-4 bg-white hover:bg-red-50 text-red-600 border border-red-200 hover:border-red-300 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2"
+                                data-plan-id="{{ $plan->id }}"
+                                data-step-order="{{ $step->step_order }}">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                            Request Changes
+                        </button>
                     </div>
                 @endif
             </div>
@@ -124,4 +120,74 @@
         @endif
     </main>
 </div>
+
+<script>
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+document.addEventListener('click', async (e) => {
+    const approveBtn = e.target.closest('.btn-approve-step');
+    const rejectBtn = e.target.closest('.btn-reject-step');
+
+    if (approveBtn) {
+        e.preventDefault();
+        const planId = approveBtn.dataset.planId;
+        const stepOrder = approveBtn.dataset.stepOrder;
+        
+        approveBtn.disabled = true;
+        approveBtn.innerHTML = '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Approving...';
+        
+        try {
+            const resp = await fetch(`/studio/plan/${planId}/step/${stepOrder}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF_TOKEN }
+            });
+            const data = await resp.json();
+            
+            if (data.success) {
+                window.location.href = '{{ route("studio.generations") }}';
+            } else {
+                alert(data.error || 'Failed to approve step');
+                approveBtn.disabled = false;
+                approveBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg> Approve & Continue';
+            }
+        } catch (err) {
+            alert('Error: ' + err.message);
+            approveBtn.disabled = false;
+            approveBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg> Approve & Continue';
+        }
+    }
+
+    if (rejectBtn) {
+        e.preventDefault();
+        const planId = rejectBtn.dataset.planId;
+        const stepOrder = rejectBtn.dataset.stepOrder;
+        
+        const reason = prompt('Please provide a reason for the changes (optional):');
+        
+        rejectBtn.disabled = true;
+        rejectBtn.innerHTML = '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Sending...';
+        
+        try {
+            const resp = await fetch(`/studio/plan/${planId}/step/${stepOrder}/reject`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': CSRF_TOKEN },
+                body: JSON.stringify({ rejection_reason: reason })
+            });
+            const data = await resp.json();
+            
+            if (data.success) {
+                window.location.href = '{{ route("studio.index") }}';
+            } else {
+                alert(data.error || 'Failed to reject step');
+                rejectBtn.disabled = false;
+                rejectBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg> Request Changes';
+            }
+        } catch (err) {
+            alert('Error: ' + err.message);
+            rejectBtn.disabled = false;
+            rejectBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg> Request Changes';
+        }
+    }
+});
+</script>
 @endsection

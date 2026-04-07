@@ -10,6 +10,7 @@ use App\Models\WorkflowPlanStep;
 use App\Models\Workflow;
 use App\Ai\Skills\WorkflowBuilderSkill;
 use App\Services\WorkflowBuilderService;
+use App\Services\McpService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -309,7 +310,9 @@ class StudioController extends Controller
                     'step_order'    => $s->step_order,
                     'purpose'       => $s->purpose,
                     'workflow_type' => $s->workflow_type,
-                    'input_types'  => $s->workflow->input_types ?? [],
+                    'input_types'   => $s->workflow->input_types ?? [],
+                    'output_type'   => $s->workflow->output_type ?? null,
+                    'depends_on'    => $s->depends_on ?? [],
                 ]),
         ]);
     }
@@ -328,7 +331,8 @@ class StudioController extends Controller
             'plan_id'     => 'required|integer|exists:workflow_plans,id',
             'step_order'  => 'required|integer|min:0',
             'messages'    => 'required|array',
-            'turn_number' => 'required|integer|min:1|max:3',
+            'turn_number' => 'required|integer|min:1|max:20',
+            'is_redo'     => 'boolean',
         ]);
 
         $plan = WorkflowPlan::findOrFail($request->input('plan_id'));
@@ -338,8 +342,17 @@ class StudioController extends Controller
 
         $messages   = $request->input('messages');
         $turnNumber = $request->input('turn_number');
+        $isRedo     = (bool) $request->input('is_redo', false);
         $outputType = $step->workflow->output_type;
         $agent      = new WorkflowOptimizerAgent($this->model);
+
+        // On redo, the agent resets to turn 1 but the seed message already contains
+        // the full context (original intent + rejection reason). Nudging turnNumber
+        // to at least 2 pushes the agent past its "ask clarifying questions" phase
+        // and into prompt-proposal mode immediately.
+        if ($isRedo && $turnNumber <= 1) {
+            $turnNumber = 2;
+        }
 
         return response()->stream(function () use ($messages, $outputType, $turnNumber, $agent) {
             try {
@@ -378,30 +391,106 @@ class StudioController extends Controller
     /**
      * POST /studio/plan/{plan}/step/{order}/confirm
      * Save the confirmed refined prompt for a step.
+     *
+     * Called in two distinct contexts:
+     *   A) User confirms prompt in refinement phase — sends refined_prompt + optional input_files
+     *   B) Auto-chain after approveStep() — sends input_files only (no prompt, step already confirmed)
+     *
+     * input_files is always MERGED into the existing JSON column so that multiple
+     * upstream approvals (each contributing a different media type) accumulate
+     * correctly rather than overwriting each other.
      */
     public function confirmStep(Request $request, WorkflowPlan $plan, int $order): JsonResponse
     {
         $this->authorisePlan($plan);
 
         $request->validate([
-            'refined_prompt'  => 'required|string|min:5',
-            'input_file_path' => 'nullable|string', // storage-relative path from prior /studio/upload call
+            'refined_prompt'  => 'nullable|string|min:5',
+            'input_file_path' => 'nullable|string',
+            // Multi-input map: {"image": "comfyui-inputs/a.png", "audio": "comfyui-inputs/b.mp3"}
+            'input_files'     => 'nullable|array',
+            'input_files.*'   => 'string',
         ]);
 
         $step = $plan->steps()->where('step_order', $order)->firstOrFail();
 
-        $updateData = ['refined_prompt' => $request->input('refined_prompt')];
+        $updateData = [];
 
-        // Persist user-uploaded input file path if provided
-        if ($request->filled('input_file_path')) {
+        // Only write refined_prompt when provided and not already confirmed —
+        // auto-chain calls from approveStep() send no prompt; user prompt must not be overwritten.
+        if ($request->filled('refined_prompt') && empty($step->refined_prompt)) {
+            $updateData['refined_prompt'] = $request->input('refined_prompt');
+        } elseif ($request->filled('refined_prompt')) {
+            // Explicit user re-confirmation (e.g. redo) — always accept
+            $updateData['refined_prompt'] = $request->input('refined_prompt');
+        }
+
+        // Multi-input files: merge into existing map so successive chain calls accumulate
+        if ($request->filled('input_files')) {
+            $existing = $step->input_files ?? [];
+            $updateData['input_files'] = array_merge($existing, $request->input('input_files'));
+        }
+
+        // Legacy single-file path — still supported for backward compat
+        if ($request->filled('input_file_path') && ! $request->filled('input_files')) {
             $updateData['input_file_path'] = $request->input('input_file_path');
         }
 
-        $step->update($updateData);
+        if (! empty($updateData)) {
+            $step->update($updateData);
+        }
 
         return response()->json(['success' => true, 'step_order' => $order]);
     }
+    public function cancelStep(WorkflowPlan $plan, int $order, McpService $mcp): JsonResponse
+    {
+        $step = $plan->steps()->where('step_order', $order)->firstOrFail();
+ 
+    // Only running steps can be cancelled — guard against double-cancel
+        if (! $step->isRunning() && ! $step->isAwaitingApproval()) {
+            return response()->json([
+                'success' => false,
+                'error'   => "Step {$order} is not in a cancellable state (status: {$step->status}).",
+            ], 422);
+        }
+ 
+    // Fire-and-forget the ComfyUI cancel — even if it fails, we mark cancelled
+    // in the DB so the plan loop stops. The ComfyUI job may finish naturally
+    // but its output will be ignored since the plan is halted.
+        if ($step->comfy_job_id) {
+            $cancelled = $mcp->cancelJob($step->comfy_job_id);
+            Log::info("StudioController::cancelStep: ComfyUI cancel result", [
+                'job_id'    => $step->comfy_job_id,
+                'cancelled' => $cancelled,
+            ]);
+        }
+ 
+        $step->markCancelled();
+ 
+        return response()->json(['success' => true]);
+    }
+ 
+/**
+ * Return current ComfyUI queue depth for the execution UI.
+ *
+ * Called every 10 seconds by fetchQueueStatus() in studio.execution.js
+ * to display "N jobs ahead of yours" in the amber queue status bar.
+ *
+ * Route: GET /studio/queue-status
+     */
+    public function queueStatus(McpService $mcp): JsonResponse
+    {
+        return response()->json($mcp->getQueueStatus());
+    }
 
+    /**
+     * GET /studio/comfy-health
+     * Return ComfyUI reachability status for frontend LED indicator.
+     */
+    public function comfyHealth(McpService $mcp): JsonResponse
+    {
+        return response()->json($mcp->healthCheck());
+    }
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 3 — Execution
     // ─────────────────────────────────────────────────────────────────────────
@@ -522,24 +611,7 @@ class StudioController extends Controller
      * GET /studio/queue-status
      * Summary for the jobs panel badge.
      */
-    public function queueStatus(): JsonResponse
-    {
-        $sessionId = session()->getId();
 
-        $running  = WorkflowPlan::where('session_id', $sessionId)->where('status', 'running')->count();
-        $queued   = WorkflowPlan::where('session_id', $sessionId)->where('status', 'queued')->count();
-        $pending  = WorkflowPlan::where('session_id', $sessionId)->where('status', 'pending')->count();
-        $awaiting = WorkflowPlanStep::whereHas('plan', fn($q) => $q->where('session_id', $sessionId))
-            ->where('status', 'awaiting_approval')->count();
-
-        return response()->json([
-            'running'   => $running,
-            'queued'    => $queued,
-            'pending'   => $pending,
-            'awaiting'  => $awaiting,
-            'total_active' => $running + $queued + $awaiting,
-        ]);
-    }
 
     /**
      * POST /studio/plan/{plan}/mood-board
@@ -613,7 +685,7 @@ class StudioController extends Controller
      * POST /studio/plan/{plan}/step/{order}/reject
      * User rejects an intermediate result — step returns to pending for re-refinement.
      */
-    public function rejectStep(WorkflowPlan $plan, int $order): JsonResponse
+    public function rejectStep(Request $request, WorkflowPlan $plan, int $order): JsonResponse
     {
         $this->authorisePlan($plan);
 
@@ -623,11 +695,31 @@ class StudioController extends Controller
             return response()->json(['error' => 'Step is not awaiting approval.'], 422);
         }
 
+        $rejectionReason = $request->input('rejection_reason'); // optional free-text from user
+
         $step->resetForRefinement();
 
-        Log::info("Studio: Plan #{$plan->id} step {$order} rejected by user — reset for re-refinement.");
+        // Explicitly null the refined_prompt so dispatch() cannot re-use the stale
+        // prompt if the user confirms without changing anything in the redo flow.
+        // input_file_path and input_files are intentionally preserved — the user's
+        // uploaded source files are still valid for the redo attempt.
+        $step->update(['refined_prompt' => null]);
 
-        return response()->json(['success' => true, 'step_order' => $order, 'status' => 'pending']);
+        Log::info("Studio: Plan #{$plan->id} step {$order} rejected by user — reset for re-refinement.", [
+            'rejection_reason' => $rejectionReason,
+        ]);
+
+        // Return step context so the JS can build a grounded redo seed message.
+        // purpose and user_intent anchor the agent to the original intent
+        // and prevent hallucination on re-entry.
+        return response()->json([
+            'success'          => true,
+            'step_order'       => $order,
+            'status'           => 'pending',
+            'purpose'          => $step->purpose,
+            'user_intent'      => $plan->user_intent,
+            'rejection_reason' => $rejectionReason,
+        ]);
     }
 
     /**

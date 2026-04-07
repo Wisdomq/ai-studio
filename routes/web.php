@@ -33,6 +33,18 @@ Route::get('/studio/plan/{plan}/status',                   [StudioController::cl
 Route::post('/studio/plan/{plan}/step/{order}/approve',    [StudioController::class, 'approveStep'])->name('studio.plan.step.approve');
 Route::post('/studio/plan/{plan}/step/{order}/reject',     [StudioController::class, 'rejectStep'])->name('studio.plan.step.reject');
 
+// Cancel a running step (user-facing + admin)
+Route::post('/studio/plan/{plan}/step/{order}/cancel', [StudioController::class, 'cancelStep'])
+    ->name('studio.plan.step.cancel');
+ 
+// ComfyUI queue depth — polled every 10s during execution phase
+Route::get('/studio/queue-status', [StudioController::class, 'queueStatus'])
+    ->name('studio.queue-status');
+
+// ComfyUI health check — polled by frontend LED indicator
+Route::get('/studio/comfy-health', [StudioController::class, 'comfyHealth'])
+    ->name('studio.comfy-health');
+
 // Jobs panel — all session jobs
 Route::get('/studio/jobs',                                 [StudioController::class, 'jobs'])->name('studio.jobs');
 Route::get('/studio/queue-status',                         [StudioController::class, 'queueStatus'])->name('studio.queue-status');
@@ -59,3 +71,4 @@ Route::prefix('admin')->name('admin.')->group(function () {
     Route::post('/workflows/comfy-import',           [AdminController::class, 'importComfyWorkflow'])->name('workflows.comfy-import');
     Route::post('/workflows/comfy-import-json',      [AdminController::class, 'importJsonDirect'])->name('workflows.comfy-import-json');
 });
+
