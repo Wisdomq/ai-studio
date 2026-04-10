@@ -59,50 +59,53 @@ class AdminController extends Controller
     /**
      * PATCH /admin/workflows/{workflow}
      * Update workflow metadata — name, description, type, output_type,
-     * input_types, inject_keys. Does NOT update workflow_json.
+     * input_types, inject_keys, mcp_workflow_id. Does NOT update workflow_json.
      */
     public function updateWorkflow(Request $request, Workflow $workflow): JsonResponse
     {
         $request->validate([
-            'name'        => 'required|string|max:255',
-            'description' => 'required|string',
-            'type'        => 'required|string',
-            'output_type' => 'required|string',
-            'input_types' => 'nullable|array',
-            'inject_keys' => 'nullable|array',
+            'name'             => 'required|string|max:255',
+            'description'      => 'required|string',
+            'type'             => 'required|string',
+            'output_type'      => 'required|string',
+            'input_types'      => 'nullable|array',
+            'inject_keys'      => 'nullable|array',
+            'mcp_workflow_id'  => 'nullable|string|max:255',
         ]);
 
         $workflow->update([
-            'name'        => $request->name,
-            'description' => $request->description,
-            'type'        => $request->type,
-            'output_type' => $request->output_type,
-            'input_types' => $request->input_types ?? [],
-            'inject_keys' => $request->inject_keys ?? [],
+            'name'            => $request->name,
+            'description'     => $request->description,
+            'type'            => $request->type,
+            'output_type'     => $request->output_type,
+            'input_types'     => $request->input_types ?? [],
+            'inject_keys'     => $request->inject_keys ?? [],
+            'mcp_workflow_id' => $request->mcp_workflow_id ?: null,
         ]);
 
         Log::info('AdminController: Workflow updated', [
-            'workflow_id' => $workflow->id,
-            'name'        => $workflow->name,
+            'workflow_id'     => $workflow->id,
+            'name'            => $workflow->name,
+            'mcp_workflow_id' => $workflow->mcp_workflow_id,
         ]);
 
         return response()->json([
             'success'  => true,
             'workflow' => [
-                'id'          => $workflow->id,
-                'name'        => $workflow->name,
-                'description' => $workflow->description,
-                'type'        => $workflow->type,
-                'output_type' => $workflow->output_type,
-                'input_types' => $workflow->input_types,
-                'inject_keys' => $workflow->inject_keys,
+                'id'             => $workflow->id,
+                'name'           => $workflow->name,
+                'description'    => $workflow->description,
+                'type'           => $workflow->type,
+                'output_type'    => $workflow->output_type,
+                'input_types'    => $workflow->input_types,
+                'inject_keys'    => $workflow->inject_keys,
+                'mcp_workflow_id'=> $workflow->mcp_workflow_id,
             ],
         ]);
     }
 
     /**
      * DELETE /admin/workflows/{workflow}
-     * Permanently delete a workflow record.
      */
     public function deleteWorkflow(Workflow $workflow): JsonResponse
     {
@@ -119,12 +122,76 @@ class AdminController extends Controller
         return response()->json(['success' => true]);
     }
 
+    // ── MCP Node Inspection ───────────────────────────────────────────────────
+
+    /**
+     * GET /admin/workflows/{workflow}/preview-live
+     *
+     * Fetch the live node map for this workflow from the MCP sidecar and
+     * return it as JSON for admin inspection.
+     *
+     * Only works when:
+     *   - COMFYUI_MCP_ENABLED=true in .env
+     *   - The workflow has a mcp_workflow_id set
+     *
+     * The returned node map lists each node's ID, class_type, and editable
+     * (non-linked) inputs — useful for knowing what to patch and what
+     * placeholder tokens or file inputs each node expects.
+     */
+    public function previewLiveWorkflow(McpService $mcp, Workflow $workflow): JsonResponse
+    {
+        if (! config('services.comfyui_mcp.enabled', false)) {
+            return response()->json([
+                'success' => false,
+                'error'   => 'MCP is not enabled. Set COMFYUI_MCP_ENABLED=true in your .env file.',
+            ], 422);
+        }
+
+        if (empty($workflow->mcp_workflow_id)) {
+            return response()->json([
+                'success' => false,
+                'error'   => 'This workflow does not have an MCP Workflow ID set. Edit the workflow and add one first.',
+            ], 422);
+        }
+
+        try {
+            $nodes = $mcp->mcpGetWorkflowNodes($workflow->mcp_workflow_id);
+
+            if (empty($nodes)) {
+                return response()->json([
+                    'success' => false,
+                    'error'   => "MCP returned an empty node map for '{$workflow->mcp_workflow_id}'. Check the workflow file exists in the sidecar's workflows/ directory.",
+                ], 404);
+            }
+
+            Log::info('AdminController: previewLiveWorkflow fetched node map', [
+                'workflow_id'     => $workflow->id,
+                'mcp_workflow_id' => $workflow->mcp_workflow_id,
+                'node_count'      => count($nodes),
+            ]);
+
+            return response()->json([
+                'success'         => true,
+                'workflow_name'   => $workflow->name,
+                'mcp_workflow_id' => $workflow->mcp_workflow_id,
+                'node_count'      => count($nodes),
+                'nodes'           => $nodes,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::warning('AdminController: previewLiveWorkflow failed', [
+                'workflow_id'     => $workflow->id,
+                'mcp_workflow_id' => $workflow->mcp_workflow_id,
+                'error'           => $e->getMessage(),
+            ]);
+            return response()->json(['success' => false, 'error' => $e->getMessage()], 500);
+        }
+    }
+
     // ── ComfyUI Import ────────────────────────────────────────────────────────
 
     /**
      * GET /admin/workflows/comfy-list
-     * Fetch all saved workflows from ComfyUI server.
-     * Returns a list for the admin to browse and pick from.
      */
     public function listComfyWorkflows(): JsonResponse
     {
@@ -143,7 +210,7 @@ class AdminController extends Controller
                 $workflows = collect($files)
                     ->filter(fn($f) => str_ends_with($f, '.json'))
                     ->map(fn($f) => [
-                        'path'  => $f,  // keep exactly as returned — used verbatim in import
+                        'path'  => $f,
                         'name'  => pathinfo(basename($f), PATHINFO_FILENAME),
                         'label' => str_replace(['_', '-'], ' ', pathinfo(basename($f), PATHINFO_FILENAME)),
                     ])
@@ -153,7 +220,7 @@ class AdminController extends Controller
                 return response()->json([
                     'success'   => true,
                     'workflows' => $workflows,
-                    'raw_paths' => $files, // debug
+                    'raw_paths' => $files,
                 ]);
             }
 
@@ -167,16 +234,9 @@ class AdminController extends Controller
 
     /**
      * POST /admin/workflows/comfy-import
-     * Fetch a specific workflow JSON from ComfyUI and save it to the DB.
      *
-     * Body:
-     *   path        — the workflow file path returned by comfy-list
-     *   name        — display name for this workflow
-     *   type        — image|video|audio|image_to_video|video_to_video|avatar_video
-     *   output_type — image|video|audio
-     *   description — what this workflow does
-     *   input_types — [] or ["image","audio"] etc.
-     *   inject_keys — {} or {"image":"{{INPUT_IMAGE}}"} etc.
+     * When skip_json=true, stores only metadata with comfy_workflow_name set.
+     * The workflow JSON is fetched from ComfyUI on-demand at execution time.
      */
     public function importComfyWorkflow(Request $request): JsonResponse
     {
@@ -188,14 +248,51 @@ class AdminController extends Controller
             'description' => 'required|string',
             'input_types' => 'nullable|array',
             'inject_keys' => 'nullable|array',
+            'skip_json'   => 'nullable|boolean',
         ]);
 
+        $skipJson = $request->boolean('skip_json', false);
+
+        // When skip_json=true, don't fetch or store the workflow JSON
+        if ($skipJson) {
+            $workflow = Workflow::updateOrCreate(
+                ['comfy_workflow_name' => $request->path],
+                [
+                    'name'                => $request->name,
+                    'type'                => $request->type,
+                    'output_type'         => $request->output_type,
+                    'description'         => $request->description,
+                    'workflow_json'       => null, // No JSON stored
+                    'input_types'         => $request->input_types ?? [],
+                    'inject_keys'         => $request->inject_keys ?? [],
+                    'is_active'           => false,
+                    'discovered_at'       => now(),
+                    'comfy_workflow_name' => $request->path,
+                ]
+            );
+
+            Log::info('AdminController: Imported workflow from ComfyUI (ComfyUI-direct, no JSON stored)', [
+                'workflow_id'    => $workflow->id,
+                'name'           => $workflow->name,
+                'comfy_workflow_name' => $request->path,
+            ]);
+
+            return response()->json([
+                'success'     => true,
+                'workflow_id' => $workflow->id,
+                'name'        => $workflow->name,
+                'mode'        => 'comfyui_direct',
+                'message'     => "Workflow registered in ComfyUI-direct mode. JSON will be fetched from ComfyUI at execution time.",
+            ]);
+        }
+
+        // Original behavior: fetch and store JSON
         try {
-            // Fetch the workflow JSON from ComfyUI
-            // The path from listing already includes 'workflows/' prefix
-            $encodedPath = rawurlencode($request->path);
             $response = Http::timeout(15)
-                ->get("{$this->comfyUrl}/api/userdata/{$encodedPath}");
+                ->get("{$this->comfyUrl}/api/userdata", [
+                    'dir'  => 'workflows',
+                    'file' => $request->path,
+                ]);
 
             if (! $response->successful()) {
                 return response()->json([
@@ -213,9 +310,6 @@ class AdminController extends Controller
                 ], 422);
             }
 
-            // ComfyUI saves workflows in "graph format" — we need API format.
-            // The /api/userdata endpoint returns the full workflow object.
-            // We need to extract just the nodes portion for API submission.
             $apiJson = $this->convertToApiFormat($workflowData);
 
             if (! $apiJson) {
@@ -225,8 +319,7 @@ class AdminController extends Controller
                 ], 422);
             }
 
-            // Validate it's real ComfyUI JSON
-            $decoded = json_decode($apiJson, true);
+            $decoded  = json_decode($apiJson, true);
             $hasNodes = is_array($decoded) && collect($decoded)->contains(fn($n) => isset($n['class_type']));
 
             if (! $hasNodes) {
@@ -236,7 +329,6 @@ class AdminController extends Controller
                 ], 422);
             }
 
-            // Save to DB
             $workflow = Workflow::updateOrCreate(
                 ['comfy_workflow_name' => $request->path],
                 [
@@ -247,17 +339,17 @@ class AdminController extends Controller
                     'workflow_json'       => $apiJson,
                     'input_types'         => $request->input_types ?? [],
                     'inject_keys'         => $request->inject_keys ?? [],
-                    'is_active'           => false, // Admin must enable after reviewing
+                    'is_active'           => false,
                     'discovered_at'       => now(),
                     'comfy_workflow_name' => $request->path,
                 ]
             );
 
             Log::info('AdminController: Imported workflow from ComfyUI', [
-                'workflow_id'   => $workflow->id,
-                'name'          => $workflow->name,
-                'comfy_path'    => $request->path,
-                'node_count'    => count($decoded),
+                'workflow_id' => $workflow->id,
+                'name'        => $workflow->name,
+                'comfy_path'  => $request->path,
+                'node_count'  => count($decoded),
             ]);
 
             return response()->json([
@@ -276,28 +368,23 @@ class AdminController extends Controller
 
     /**
      * POST /admin/workflows/comfy-import-json
-     * Direct JSON paste import — user pastes API-format JSON into a textarea.
-     * This is the most reliable import method since it bypasses format conversion.
      */
     public function importJsonDirect(Request $request): JsonResponse
     {
         $request->validate([
-            'workflow_json' => 'required|string',
-            'name'          => 'required|string|max:255',
-            'type'          => 'required|string',
-            'output_type'   => 'required|string',
-            'description'   => 'required|string',
-            'input_types'   => 'nullable|array',
-            'inject_keys'   => 'nullable|array',
+            'workflow_json'   => 'required|string',
+            'name'            => 'required|string|max:255',
+            'type'            => 'required|string',
+            'output_type'     => 'required|string',
+            'description'     => 'required|string',
+            'input_types'     => 'nullable|array',
+            'inject_keys'     => 'nullable|array',
+            'mcp_workflow_id' => 'nullable|string|max:255',
         ]);
 
         $json = trim($request->workflow_json);
-
-        // Normalize placeholders: convert unquoted {{PLACEHOLDER}} to quoted "{{PLACEHOLDER}}"
-        // This makes the JSON valid for database storage while preserving the placeholders
         $json = $this->normalizePlaceholders($json);
 
-        // Validate the normalized JSON
         $decoded = json_decode($json, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
             return response()->json([
@@ -306,7 +393,6 @@ class AdminController extends Controller
             ], 422);
         }
 
-        // Check it has ComfyUI nodes
         $hasNodes = is_array($decoded) && collect($decoded)->contains(fn($n) => isset($n['class_type']));
         if (! $hasNodes) {
             return response()->json([
@@ -316,15 +402,16 @@ class AdminController extends Controller
         }
 
         $workflow = Workflow::create([
-            'name'          => $request->name,
-            'type'          => $request->type,
-            'output_type'   => $request->output_type,
-            'description'   => $request->description,
-            'workflow_json' => $json,  // original — placeholders preserved
-            'input_types'   => $request->input_types ?? [],
-            'inject_keys'   => $request->inject_keys ?? [],
-            'is_active'     => false,
-            'discovered_at' => now(),
+            'name'            => $request->name,
+            'type'            => $request->type,
+            'output_type'     => $request->output_type,
+            'description'     => $request->description,
+            'workflow_json'   => $json,
+            'input_types'     => $request->input_types ?? [],
+            'inject_keys'     => $request->inject_keys ?? [],
+            'mcp_workflow_id' => $request->mcp_workflow_id ?: null,
+            'is_active'       => false,
+            'discovered_at'   => now(),
         ]);
 
         return response()->json([
@@ -374,22 +461,8 @@ class AdminController extends Controller
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /**
-     * Normalize placeholders in workflow JSON: convert unquoted {{PLACEHOLDER}}
-     * to quoted "{{PLACEHOLDER}}" so the JSON is valid for database storage.
-     *
-     * Unquoted placeholders like:
-     *   "seed": {{SEED}}
-     * become:
-     *   "seed": "{{SEED}}"
-     *
-     * This allows the JSON to be stored in the database while still being
-     * replaceable at runtime by injectPrompt().
-     */
     protected function normalizePlaceholders(string $json): string
     {
-        // Strip any Blade-escape @ prefix the user may have typed (e.g. @{{SEED}} → {{SEED}})
-        // This keeps the rest of the logic uniform.
         $json = preg_replace('/@(\{\{[A-Z_]+\}\})/', '$1', $json);
 
         $placeholders = [
@@ -401,10 +474,8 @@ class AdminController extends Controller
         ];
 
         foreach ($placeholders as $placeholder) {
-            // Match unquoted placeholder: colon + whitespace + placeholder + comma/brace
-            // Must NOT be already quoted (no quote before colon, and placeholder not wrapped)
             $json = preg_replace_callback(
-                '/(?<!")(:)\s*' . preg_quote($placeholder, '/') . '\s*([,\}])/i',
+                '/(?<!")([:])\\s*' . preg_quote($placeholder, '/') . '\\s*([,\\}])/i',
                 function ($matches) use ($placeholder) {
                     return $matches[1] . ' "' . $placeholder . '" ' . $matches[2];
                 },
@@ -415,15 +486,6 @@ class AdminController extends Controller
         return $json;
     }
 
-    /**
-     * Replace numeric injectPrompt placeholders with valid dummy values so that
-     * json_decode() can validate the overall structure without choking on bare
-     * tokens like {{SEED}} that are not valid JSON number literals.
-     *
-     * Only numeric placeholders need this treatment — string placeholders
-     * ({{POSITIVE_PROMPT}}, {{NEGATIVE_PROMPT}}, {{INPUT_IMAGE}}, etc.) sit
-     * inside JSON quoted strings already and are valid as-is.
-     */
     protected function substituteNumericPlaceholders(string $json): string
     {
         $numericPlaceholders = [
@@ -447,30 +509,21 @@ class AdminController extends Controller
         );
     }
 
-    /**
-     * ComfyUI saves workflows in "graph format" with extra metadata.
-     * API format is just the nodes object keyed by node ID.
-     * Try to extract the nodes from the graph format.
-     */
     protected function convertToApiFormat(array $workflowData): ?string
     {
-        // Already in API format (keys are numeric node IDs with class_type)
         $firstVal = reset($workflowData);
         if (is_array($firstVal) && isset($firstVal['class_type'])) {
             return json_encode($workflowData);
         }
 
-        // Graph format has a 'nodes' array
         if (isset($workflowData['nodes']) && is_array($workflowData['nodes'])) {
             $apiNodes = [];
             foreach ($workflowData['nodes'] as $node) {
                 $nodeId = (string) $node['id'];
                 $inputs = [];
 
-                // Extract widget values into inputs
                 foreach ($node['inputs'] ?? [] as $input) {
                     if (isset($input['link'])) {
-                        // Linked input — we can't easily resolve this without the link table
                         continue;
                     }
                     if (isset($input['widget']['value'])) {
@@ -478,7 +531,6 @@ class AdminController extends Controller
                     }
                 }
 
-                // Widget values are in a separate array in some formats
                 $widgetValues = $node['widgets_values'] ?? [];
                 $widgetIdx    = 0;
                 foreach ($node['inputs'] ?? [] as $input) {
@@ -499,7 +551,6 @@ class AdminController extends Controller
             }
         }
 
-        // Extra format: workflow is nested under 'workflow' key
         if (isset($workflowData['workflow'])) {
             return $this->convertToApiFormat($workflowData['workflow']);
         }
@@ -507,10 +558,6 @@ class AdminController extends Controller
         return null;
     }
 
-    /**
-     * Fallback: list node types as a proxy for available workflows
-     * when /api/userdata is not available.
-     */
     protected function fallbackListWorkflows(): JsonResponse
     {
         return response()->json([

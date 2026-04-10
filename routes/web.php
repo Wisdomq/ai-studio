@@ -65,6 +65,7 @@ Route::prefix('admin')->name('admin.')->group(function () {
     Route::patch('/workflows/{workflow}/set-default', [AdminController::class, 'setDefault'])->name('workflows.set-default');
     Route::patch('/workflows/{workflow}',             [AdminController::class, 'updateWorkflow'])->name('workflows.update');
     Route::delete('/workflows/{workflow}',            [AdminController::class, 'deleteWorkflow'])->name('workflows.delete');
+    Route::get('/workflows/{workflow}/preview-live', [AdminController::class, 'previewLiveWorkflow'])->name('workflows.preview-live');
 
     // ComfyUI direct import
     Route::get('/workflows/comfy-list',              [AdminController::class, 'listComfyWorkflows'])->name('workflows.comfy-list');

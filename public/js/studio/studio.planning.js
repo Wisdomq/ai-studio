@@ -503,14 +503,45 @@ function checkAllStepCardsDecided() {
     if (!allDecided) return;
 
     // Build the approved sub-plan (only approved steps, re-indexed)
-    const approvedSteps = currentPlan
-        .filter(step => planCardApprovals[step.step_order]?.approved)
-        .map((step, newIndex) => ({
+    // Keep the original step orders for dependency remapping
+    const approvedStepsRaw = currentPlan.filter(step => planCardApprovals[step.step_order]?.approved);
+
+    // Build oldStepOrder -> newStepOrder mapping
+    const oldToNew = {};
+    approvedStepsRaw.forEach((step, newIndex) => {
+        oldToNew[step.step_order] = newIndex;
+    });
+
+    // Re-index steps and remap dependencies
+    const approvedSteps = approvedStepsRaw.map((step, newIndex) => {
+        // Remap depends_on to new indices
+        let remappedDeps;
+        if (step.depends_on && typeof step.depends_on === 'object') {
+            if (Array.isArray(step.depends_on)) {
+                // Legacy flat format: [0, 1] → remap each value
+                remappedDeps = step.depends_on
+                    .map(oldIdx => oldToNew[oldIdx] ?? oldIdx)
+                    .filter(idx => idx !== undefined);
+            } else {
+                // Keyed format: {'image': 0, 'video': 1} → remap values, keep keys
+                remappedDeps = {};
+                for (const [inputType, oldIdx] of Object.entries(step.depends_on)) {
+                    const newIdx = oldToNew[oldIdx];
+                    if (newIdx !== undefined) {
+                        remappedDeps[inputType] = newIdx;
+                    }
+                }
+            }
+        } else {
+            remappedDeps = [];
+        }
+
+        return {
             ...step,
             step_order: newIndex,
-            // Re-wire depends_on to new indices
-            depends_on: newIndex > 0 ? [newIndex - 1] : [],
-        }));
+            depends_on: remappedDeps,
+        };
+    });
 
     if (approvedSteps.length === 0) {
         // All skipped — clean up and let user try again

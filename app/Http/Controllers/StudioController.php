@@ -263,12 +263,13 @@ class StudioController extends Controller
         $request->validate([
             'user_intent' => 'required|string',
             'steps'       => 'required|array|min:1',
-            'steps.*.step_order'    => 'required|integer|min:0',
-            'steps.*.workflow_id'   => 'required|integer|exists:workflows,id',
-            'steps.*.workflow_type' => 'required|string',
-            'steps.*.purpose'       => 'required|string',
-            'steps.*.prompt_hint'   => 'nullable|string',
-            'steps.*.depends_on'    => 'nullable|array',
+            'steps.*.step_order'      => 'required|integer|min:0',
+            'steps.*.execution_layer' => 'nullable|integer|min:0',
+            'steps.*.workflow_id'     => 'required|integer|exists:workflows,id',
+            'steps.*.workflow_type'   => 'required|string',
+            'steps.*.purpose'         => 'required|string',
+            'steps.*.prompt_hint'     => 'nullable|string',
+            'steps.*.depends_on'      => 'nullable|array',
             'files'        => 'nullable|array',
             'files.*.storage_path' => 'required|string',
             'files.*.media_type'   => 'required|string|in:image,video,audio',
@@ -289,13 +290,14 @@ class StudioController extends Controller
             $workflow = Workflow::findOrFail((int) $stepData['workflow_id']);
 
             WorkflowPlanStep::create([
-                'plan_id'        => $plan->id,
-                'workflow_id'    => $workflow->id,
-                'step_order'     => (int) $stepData['step_order'],
-                'workflow_type'  => $stepData['workflow_type'],
-                'purpose'        => $stepData['purpose'],
-                'depends_on'     => $stepData['depends_on'] ?? [],
-                'status'         => 'pending',
+                'plan_id'         => $plan->id,
+                'workflow_id'     => $workflow->id,
+                'step_order'      => (int) $stepData['step_order'],
+                'execution_layer' => (int) ($stepData['execution_layer'] ?? 0),
+                'workflow_type'   => $stepData['workflow_type'],
+                'purpose'         => $stepData['purpose'],
+                'depends_on'      => $stepData['depends_on'] ?? [],
+                'status'          => 'pending',
             ]);
         }
 
@@ -306,13 +308,14 @@ class StudioController extends Controller
             'input_files' => $inputFiles,
             'steps'      => $plan->steps()->orderBy('step_order')->with('workflow')->get()
                 ->map(fn($s) => [
-                    'id'            => $s->id,
-                    'step_order'    => $s->step_order,
-                    'purpose'       => $s->purpose,
-                    'workflow_type' => $s->workflow_type,
-                    'input_types'   => $s->workflow->input_types ?? [],
-                    'output_type'   => $s->workflow->output_type ?? null,
-                    'depends_on'    => $s->depends_on ?? [],
+                    'id'              => $s->id,
+                    'step_order'      => $s->step_order,
+                    'execution_layer' => $s->execution_layer,
+                    'purpose'         => $s->purpose,
+                    'workflow_type'   => $s->workflow_type,
+                    'input_types'     => $s->workflow->input_types ?? [],
+                    'output_type'     => $s->workflow->output_type ?? null,
+                    'depends_on'      => $s->depends_on ?? [],
                 ]),
         ]);
     }
@@ -757,10 +760,12 @@ class StudioController extends Controller
     protected function sseHeaders(): array
     {
         return [
-            'Content-Type'      => 'text/event-stream',
-            'Cache-Control'     => 'no-cache',
-            'X-Accel-Buffering' => 'no',
-            'Connection'        => 'keep-alive',
+            'Content-Type'        => 'text/event-stream',
+            'Cache-Control'       => 'no-cache',
+            'X-Accel-Buffering'   => 'no',
+            'Connection'          => 'keep-alive',
+            'Access-Control-Allow-Origin'  => '*',
+            'Access-Control-Allow-Headers' => 'Content-Type',
         ];
     }
 

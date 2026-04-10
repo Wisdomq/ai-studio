@@ -27,6 +27,7 @@ class WorkflowPlanStep extends Model
         'plan_id',
         'workflow_id',
         'step_order',
+        'execution_layer',   // DAG layer — 0 = independent, N = depends on layer N-1
         'workflow_type',
         'purpose',
         'refined_prompt',
@@ -42,9 +43,10 @@ class WorkflowPlanStep extends Model
     ];
 
     protected $casts = [
-        'depends_on'  => 'array',
-        'input_files' => 'array',
-        'approved_at' => 'datetime',
+        'depends_on'      => 'array',
+        'input_files'     => 'array',
+        'approved_at'     => 'datetime',
+        'execution_layer' => 'integer',
     ];
 
     // ─── Relationships ────────────────────────────────────────────────────────
@@ -142,6 +144,9 @@ class WorkflowPlanStep extends Model
      *      Types supplied at runtime by collectDependencyFiles() from a completed
      *      dependency's output_path are excluded from this check — requiring them
      *      here would force a spurious upload prompt for auto-chained steps.
+     *
+     * supports keyed depends_on format: ['image' => 0, 'video' => 1]
+     * where keys are input types and values are step orders.
      */
     public function isReady(WorkflowPlan $plan): bool
     {
@@ -149,23 +154,28 @@ class WorkflowPlanStep extends Model
             return false;
         }
 
-        foreach ($this->depends_on ?? [] as $dependsOnOrder) {
-            $dep = $plan->steps->firstWhere('step_order', $dependsOnOrder);
+        // Handle keyed depends_on format: [type => stepOrder]
+        // Also support legacy flat format: [stepOrder, stepOrder]
+        $depCoveredTypes = [];
+        foreach ($this->depends_on ?? [] as $key => $value) {
+            $stepOrder = is_string($key) ? $value : $value; // keyed or flat
+            $type = is_string($key) ? $key : null; // only set for keyed format
+
+            $dep = $plan->steps->firstWhere('step_order', $stepOrder);
             if (! $dep || ! $dep->isCompleted()) {
                 return false;
             }
-        }
 
-        // Determine which input types will be satisfied at runtime by dependency
-        // outputs. collectDependencyFiles() reads dep->output_path directly, so
-        // these types must NOT be required in the input_files gate below.
-        $depCoveredTypes = [];
-        foreach ($this->depends_on ?? [] as $depOrder) {
-            $dep = $plan->steps->firstWhere('step_order', $depOrder);
-            if ($dep && $dep->isCompleted() && $dep->relationLoaded('workflow') && $dep->workflow) {
-                $outputType = $dep->workflow->output_type ?? null;
-                if ($outputType) {
-                    $depCoveredTypes[] = $outputType;
+            // Track covered types for the file presence check below
+            if ($type) {
+                $depCoveredTypes[] = $type;
+            } else {
+                // For flat format, use the dependency's output_type
+                if ($dep->relationLoaded('workflow') && $dep->workflow) {
+                    $outputType = $dep->workflow->output_type ?? null;
+                    if ($outputType) {
+                        $depCoveredTypes[] = $outputType;
+                    }
                 }
             }
         }

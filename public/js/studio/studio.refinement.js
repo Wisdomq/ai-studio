@@ -34,9 +34,11 @@ function startRefinementPhase(plan, steps, inputFiles = []) {
 
         // Types that upstream dependency steps will supply at runtime —
         // these must NOT get upload zones or be required in the file gate.
-        const depCoveredTypes = (enrichedStep.depends_on ?? [])
-            .map(depOrder => outputTypeByOrder[depOrder])
-            .filter(Boolean);
+        // depends_on is keyed: {'image': 0, 'video': 1}
+        // Keys are the covered types, values are step orders.
+        const depCoveredTypes = Array.isArray(enrichedStep.depends_on)
+            ? enrichedStep.depends_on.map(depOrder => outputTypeByOrder[depOrder]).filter(Boolean)  // legacy flat format
+            : Object.keys(enrichedStep.depends_on ?? {});  // keyed format — keys ARE the types
 
         // Build a pre-populated inputFiles map from plan-level uploads,
         // but only for types the user must supply manually.

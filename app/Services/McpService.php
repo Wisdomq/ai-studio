@@ -16,20 +16,23 @@ use RuntimeException;
  * MCP sidecar methods are additive and guarded by the COMFYUI_MCP_ENABLED flag.
  *
  * Direct ComfyUI tools (always available):
- *   healthCheck()          → reachable: bool, gpu_vram_free: string
- *   listWorkflows()        → ComfyUI /object_info node types (admin use)
- *   submitJob()            → prompt_id string
- *   checkJobStatus()       → status, queue_position, estimated_wait_seconds
- *   getJobResult()         → output_files[], media_type, storage_path
- *   uploadInputFile()      → comfy_filename
- *   cancelJob()            → bool (calls ComfyUI /queue DELETE directly)
- *   getQueueStatus()       → running: int, pending: int (from /queue directly)
- *   freeVram()             → freed: bool  (POST /free — unloads models + clears VRAM)
+ *   healthCheck()              → reachable: bool, gpu_vram_free: string
+ *   listWorkflows()            → ComfyUI /object_info node types (admin use)
+ *   submitJob()                → prompt_id string
+ *   checkJobStatus()           → status, queue_position, estimated_wait_seconds
+ *   getJobResult()             → output_files[], media_type, storage_path
+ *   uploadInputFile()          → comfy_filename
+ *   cancelJob()                → bool (calls ComfyUI /queue DELETE directly)
+ *   getQueueStatus()           → running: int, pending: int (from /queue directly)
+ *   freeVram()                 → freed: bool  (POST /free — unloads models + clears VRAM)
  *
  * MCP sidecar tools (require COMFYUI_MCP_ENABLED=true):
- *   mcpListWorkflows()     → array of workflow descriptors from MCP server
- *   mcpSubmitJob()         → ['prompt_id' => string, 'asset_id' => string|null]
- *   mcpPollUntilComplete() → not used — ExecutePlanJob::pollUntilComplete() handles this
+ *   mcpListWorkflows()         → array of workflow descriptors from MCP server
+ *   mcpGetWorkflowJson()       → raw JSON string for a workflow (used by workflows:sync)
+ *   mcpSubmitJob()             → ['prompt_id' => string, 'asset_id' => string|null]
+ *   mcpFetchWorkflowGraph()    → decoded node graph array for live-fetch execution path
+ *   mcpPatchAndSubmit()        → prompt_id string (load + patch + submit in one MCP call)
+ *   mcpGetWorkflowNodes()      → node map for admin node inspection
  */
 class McpService
 {
@@ -169,16 +172,11 @@ class McpService
     /**
      * Check the status of a submitted ComfyUI job.
      *
-     * Jobs appear in /history/{id} only after completion.
-     * While running, check /queue for position.
-     *
      * @param  string $jobId  ComfyUI prompt_id
      * @return array{status: string, queue_position: int|null, estimated_wait_seconds: int|null}
-     *               status: 'queued' | 'running' | 'completed' | 'failed'
      */
     public function checkJobStatus(string $jobId): array
     {
-        // Check if job is already in history (completed)
         $historyResponse = $this->get("/history/{$jobId}");
 
         if ($historyResponse->successful()) {
@@ -200,7 +198,6 @@ class McpService
             }
         }
 
-        // Job not in history yet — check queue
         $queueResponse = $this->get('/queue');
 
         if ($queueResponse->successful()) {
@@ -208,14 +205,12 @@ class McpService
             $running = $queue['queue_running'] ?? [];
             $pending = $queue['queue_pending'] ?? [];
 
-            // Check if actively running
             foreach ($running as $runningJob) {
                 if (($runningJob[1] ?? '') === $jobId) {
                     return ['status' => 'running', 'queue_position' => 0, 'estimated_wait_seconds' => null];
                 }
             }
 
-            // Check queue position
             foreach ($pending as $pos => $pendingJob) {
                 if (($pendingJob[1] ?? '') === $jobId) {
                     return [
@@ -227,7 +222,6 @@ class McpService
             }
         }
 
-        // Not found anywhere — may have just completed
         return ['status' => 'queued', 'queue_position' => null, 'estimated_wait_seconds' => null];
     }
 
@@ -241,8 +235,6 @@ class McpService
      * @param  string $jobId      ComfyUI prompt_id
      * @param  string $mediaType  'image' | 'video' | 'audio'
      * @return array{output_files: array, media_type: string, storage_path: string}
-     *
-     * @throws RuntimeException if job not found or download fails
      */
     public function getJobResult(string $jobId, string $mediaType = 'image'): array
     {
@@ -258,7 +250,6 @@ class McpService
         $storagePath = null;
 
         foreach ($outputs as $nodeId => $nodeOutputs) {
-            // Images
             foreach ($nodeOutputs['images'] ?? [] as $image) {
                 $filename    = $image['filename'];
                 $subfolder   = $image['subfolder'] ?? '';
@@ -268,7 +259,6 @@ class McpService
                 $outputFiles[] = ['filename' => $filename, 'storage_path' => $storagePath, 'media_type' => 'image'];
             }
 
-            // Videos / GIFs
             foreach ($nodeOutputs['gifs'] ?? [] as $video) {
                 $filename    = $video['filename'];
                 $subfolder   = $video['subfolder'] ?? '';
@@ -278,7 +268,6 @@ class McpService
                 $outputFiles[] = ['filename' => $filename, 'storage_path' => $storagePath, 'media_type' => 'video'];
             }
 
-            // Audio files
             foreach ($nodeOutputs['audio'] ?? [] as $audio) {
                 $filename    = $audio['filename'];
                 $subfolder   = $audio['subfolder'] ?? '';
@@ -309,14 +298,9 @@ class McpService
     /**
      * Upload a file from Laravel storage to ComfyUI input directory.
      *
-     * Despite the endpoint name /upload/image, ComfyUI accepts all media types.
-     * ComfyUI may rename the file — always use the returned filename.
-     *
-     * @param  string $storagePath  Storage-relative path (e.g. comfyui-outputs/foo.png)
+     * @param  string $storagePath  Storage-relative path
      * @param  string $mediaType    'image' | 'video' | 'audio'
-     * @return string               ComfyUI-assigned filename (use this, not the original)
-     *
-     * @throws RuntimeException on upload failure
+     * @return string               ComfyUI-assigned filename
      */
     public function uploadInputFile(string $storagePath, string $mediaType = 'image'): string
     {
@@ -345,18 +329,9 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tool 7: cancel_job  (direct ComfyUI — no MCP server needed)
+    // Tool 7: cancel_job
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Cancel a queued or running ComfyUI job.
-     *
-     * ComfyUI accepts DELETE via POST /queue with {"delete": [prompt_id]}.
-     * Jobs already completed cannot be cancelled (returns true silently).
-     *
-     * @param  string $jobId  ComfyUI prompt_id (stored as comfy_job_id on step)
-     * @return bool           true on success or if job was already done
-     */
     public function cancelJob(string $jobId): bool
     {
         try {
@@ -377,15 +352,9 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tool 8: get_queue_status  (direct ComfyUI — no MCP server needed)
+    // Tool 8: get_queue_status
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Get current ComfyUI queue depth — running and pending job counts.
-     * Used by the frontend to display "N jobs ahead of yours".
-     *
-     * @return array{running: int, pending: int}
-     */
     public function getQueueStatus(): array
     {
         try {
@@ -408,26 +377,9 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tool 9: free_vram  (direct ComfyUI — no MCP server needed)
+    // Tool 9: free_vram
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Unload all models from GPU VRAM and free memory via ComfyUI /free.
-     *
-     * Called by ExecutePlanJob after every generation step completes so that
-     * the next step (which may use entirely different models) starts with a
-     * clean VRAM slate. Without this, heavy workflows fail with OOM errors
-     * when model weights from the prior step are still resident in GPU memory.
-     *
-     * ComfyUI /free accepts:
-     *   unload_models — evict all loaded checkpoints / VAEs / LoRAs from VRAM
-     *   free_memory   — release all cached tensors and intermediate buffers
-     *
-     * The call is fire-and-forget safe: if ComfyUI is temporarily busy the
-     * caller logs a warning and continues rather than failing the plan.
-     *
-     * @return array{freed: bool, error?: string}
-     */
     public function freeVram(): array
     {
         try {
@@ -454,27 +406,15 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MCP Sidecar: mcpListWorkflows  (requires COMFYUI_MCP_ENABLED=true)
+    // MCP Sidecar: mcpListWorkflows
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * List workflows discovered by the MCP sidecar server from its workflows/ directory.
-     * Each entry includes the workflow name, description, and exposed PARAM_* parameters.
-     *
-     * This is distinct from listWorkflows() which queries ComfyUI /object_info for node types.
-     *
-     * @return array<int, array{name: string, description: string, parameters: array}>
-     * @throws RuntimeException if MCP is not enabled or server is unreachable
-     */
     public function mcpListWorkflows(): array
     {
         $this->assertMcpEnabled('mcpListWorkflows');
 
         $result = $this->mcpCall('list_workflows');
 
-        // mcpCall() unwraps the FastMCP content envelope and JSON-decodes the
-        // text block. The tool may return {"workflows": [...]} or just [...].
-        // If the server returned plain text (_text key), log and bail out.
         if (isset($result['_text'])) {
             Log::warning('McpService::mcpListWorkflows: server returned plain text — cannot parse as workflow list.', [
                 'text' => substr($result['_text'], 0, 300),
@@ -482,7 +422,6 @@ class McpService
             return [];
         }
 
-        // Support both {"workflows": [...]} and a bare array
         $workflows = $result['workflows'] ?? (array_is_list($result) ? $result : []);
 
         if (empty($workflows)) {
@@ -492,25 +431,21 @@ class McpService
 
         return array_map(function (array $wf) {
             return [
-                // 'id' is the filename stem used by run_workflow / get_workflow_json
                 'id'          => $wf['id'] ?? '',
                 'name'        => $wf['name'] ?? '',
                 'description' => $wf['description'] ?? '',
-                // Server returns 'available_inputs', not 'parameters'
                 'parameters'  => $wf['available_inputs'] ?? $wf['parameters'] ?? [],
             ];
         }, $workflows);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MCP Sidecar: mcpGetWorkflowJson  (requires COMFYUI_MCP_ENABLED=true)
+    // MCP Sidecar: mcpGetWorkflowJson
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Retrieve the raw ComfyUI node-graph JSON for a workflow from the MCP server.
-     *
-     * Used by SyncMcpWorkflows artisan command to import workflow JSON into the DB
-     * so injectPrompt() can operate on it for the direct-ComfyUI execution path.
+     * Retrieve the raw ComfyUI node-graph JSON string for a workflow from the MCP server.
+     * Used by the workflows:sync artisan command to import JSON into the DB.
      *
      * @param  string $workflowId  MCP workflow ID (e.g. 'generate_image')
      * @return string|null         Raw JSON string, or null on failure
@@ -541,17 +476,13 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MCP Sidecar: mcpSubmitJob  (requires COMFYUI_MCP_ENABLED=true)
+    // MCP Sidecar: mcpSubmitJob
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
      * Submit a fully-injected workflow JSON to ComfyUI via the MCP sidecar.
-     *
-     * The workflow JSON has already been processed by Workflow::injectPrompt()
-     * so all {{PLACEHOLDERS}} are resolved. The MCP server receives the final
-     * JSON — its own PARAM_* system is bypassed entirely.
-     *
-     * When MCP is disabled, falls back transparently to submitJob().
+     * Used by the stored-JSON execution path (Workflow::injectPrompt() path).
+     * When MCP is disabled, falls back to submitJob() directly.
      *
      * @param  string $resolvedWorkflowJson  Fully injected, valid workflow JSON string
      * @return array{prompt_id: string, asset_id: string|null}
@@ -559,27 +490,21 @@ class McpService
     public function mcpSubmitJob(string $resolvedWorkflowJson): array
     {
         if (! $this->mcpEnabled) {
-            // Feature flag off — use direct ComfyUI path, wrap return in same shape
             $promptId = $this->submitJob($resolvedWorkflowJson);
             return ['prompt_id' => $promptId, 'asset_id' => null];
         }
 
-        // Decode to array so we can pass as structured parameter
         $nodes = json_decode($resolvedWorkflowJson, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
             throw new RuntimeException('Invalid workflow JSON: ' . json_last_error_msg());
         }
 
-        // Call submit_raw_workflow — accepts a fully-resolved node graph.
-        // (run_workflow expects a workflow_id string + overrides dict, which is
-        //  the wrong shape here; injectPrompt() has already resolved everything.)
         $result = $this->mcpCall('submit_raw_workflow', ['workflow_json' => $nodes]);
 
         $promptId = $result['prompt_id'] ?? null;
         $assetId  = $result['asset_id']  ?? null;
 
         if (! $promptId) {
-            // MCP server may return the job info nested differently — log full response for debugging
             Log::error('McpService::mcpSubmitJob: no prompt_id in MCP response', ['response' => $result]);
             throw new RuntimeException('MCP server did not return a prompt_id: ' . json_encode($result));
         }
@@ -593,31 +518,358 @@ class McpService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MCP Transport (private)
+    // MCP Sidecar: mcpFetchWorkflowGraph  ← NEW
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Make a JSON-RPC 2.0 tool call to the MCP sidecar server.
+     * Fetch and decode the live ComfyUI node graph for a workflow from the MCP server.
      *
-     * @param  string $tool    MCP tool name (e.g. 'list_workflows', 'run_workflow')
-     * @param  array  $params  Tool arguments
-     * @return array           Decoded response content
+     * Used by ExecutePlanJob for the live-fetch execution path where workflow_json
+     * is NOT stored in the Laravel database (mcp_workflow_id is set instead).
+     * The returned array is passed directly to Workflow::injectPromptIntoGraph()
+     * for prompt + file injection before submission.
      *
-     * @throws RuntimeException on HTTP failure or MCP error response
+     * This is identical to mcpGetWorkflowJson() but returns a decoded array
+     * rather than a raw JSON string, since the caller needs to operate on the
+     * structure directly.
+     *
+     * @param  string $workflowId  MCP workflow ID (e.g. 'generate_image')
+     * @return array|null          Decoded node graph array, or null on failure
      */
+    public function mcpFetchWorkflowGraph(string $workflowId): ?array
+    {
+        $this->assertMcpEnabled('mcpFetchWorkflowGraph');
+
+        $result = $this->mcpCall('get_workflow_json', ['workflow_id' => $workflowId]);
+
+        if (isset($result['error'])) {
+            Log::warning("McpService::mcpFetchWorkflowGraph: server returned error for '{$workflowId}'", [
+                'error' => $result['error'],
+            ]);
+            return null;
+        }
+
+        $json = $result['workflow_json'] ?? null;
+
+        if (! $json || ! is_string($json)) {
+            Log::warning("McpService::mcpFetchWorkflowGraph: no workflow_json in response for '{$workflowId}'", [
+                'result' => $result,
+            ]);
+            return null;
+        }
+
+        $decoded = json_decode($json, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            Log::error("McpService::mcpFetchWorkflowGraph: MCP returned invalid JSON for '{$workflowId}'", [
+                'error' => json_last_error_msg(),
+            ]);
+            return null;
+        }
+
+        return $decoded;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MCP Sidecar: mcpPatchAndSubmit  ← NEW
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Load a workflow from the MCP sidecar, apply node-level patches, and
+     * submit the modified graph to ComfyUI — all in a single MCP call.
+     *
+     * This is the most direct MCP-native execution path. It is useful when
+     * you want to override specific node inputs (model names, sampler parameters,
+     * prompt text, file references) without storing any JSON in Laravel.
+     *
+     * The patches dict maps string node IDs to input override dicts:
+     *
+     *   [
+     *     '6'  => ['text' => 'a beautiful sunset'],
+     *     '3'  => ['seed' => 87634512, 'steps' => 25, 'cfg' => 7.0],
+     *     '4'  => ['ckpt_name' => 'wan2.1_t2v_14B_fp8_scaled.safetensors'],
+     *     '11' => ['audio' => 'uploaded_sound_abc.wav'],
+     *   ]
+     *
+     * Unknown node IDs are silently ignored by the MCP server (not an error).
+     * Use mcpGetWorkflowNodes() first to discover available node IDs.
+     *
+     * Note: This bypasses Workflow::injectPrompt() entirely — no PHP-side
+     * placeholder substitution occurs. The patches must be fully resolved
+     * values (actual prompt strings, actual filenames, etc.).
+     *
+     * @param  string $workflowId  MCP workflow ID (e.g. 'generate_image')
+     * @param  array  $patches     Node-level input patches: ['node_id' => ['key' => value]]
+     * @return string              ComfyUI prompt_id for status polling
+     *
+     * @throws RuntimeException on MCP failure or missing prompt_id
+     */
+    public function mcpPatchAndSubmit(string $workflowId, array $patches): string
+    {
+        $this->assertMcpEnabled('mcpPatchAndSubmit');
+
+        $result = $this->mcpCall('patch_and_submit_workflow', [
+            'workflow_id' => $workflowId,
+            'patches'     => empty($patches) ? (object) [] : $patches,
+        ]);
+
+        if (isset($result['error'])) {
+            throw new RuntimeException(
+                "McpService::mcpPatchAndSubmit error for '{$workflowId}': " . $result['error']
+            );
+        }
+
+        $promptId = $result['prompt_id'] ?? null;
+
+        if (! $promptId) {
+            Log::error('McpService::mcpPatchAndSubmit: no prompt_id in response', [
+                'workflow_id' => $workflowId,
+                'response'    => $result,
+            ]);
+            throw new RuntimeException(
+                "MCP server did not return a prompt_id for workflow '{$workflowId}': " . json_encode($result)
+            );
+        }
+
+        Log::info("McpService::mcpPatchAndSubmit: job submitted", [
+            'workflow_id'   => $workflowId,
+            'prompt_id'     => $promptId,
+            'nodes_patched' => $result['nodes_patched'] ?? [],
+        ]);
+
+        return $promptId;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MCP Sidecar: mcpGetWorkflowNodes  ← NEW
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Retrieve a simplified node map for a workflow from the MCP sidecar.
+     *
+     * Returns each node's ID, class_type, and editable (non-linked) inputs.
+     * Used by the admin panel to show which nodes and parameters are available
+     * to patch before using mcpPatchAndSubmit() or the live-fetch execution path.
+     *
+     * Linked inputs (wired from another node's output) are excluded because
+     * they are resolved by ComfyUI's graph topology at runtime and cannot be
+     * overridden as static values.
+     *
+     * @param  string $workflowId  MCP workflow ID (e.g. 'generate_image')
+     * @return array               Node map keyed by node_id, or empty array on failure.
+     *                             Shape: ['node_id' => ['class_type' => string, 'inputs' => array]]
+     */
+    public function mcpGetWorkflowNodes(string $workflowId): array
+    {
+        $this->assertMcpEnabled('mcpGetWorkflowNodes');
+
+        $result = $this->mcpCall('get_workflow_nodes', ['workflow_id' => $workflowId]);
+
+        if (isset($result['error'])) {
+            Log::warning("McpService::mcpGetWorkflowNodes: error for '{$workflowId}'", [
+                'error' => $result['error'],
+            ]);
+            return [];
+        }
+
+        return $result['nodes'] ?? [];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MCP Sidecar: mcpFetchWorkflowFromComfyUI  ← NEW
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fetch a workflow JSON directly from ComfyUI's API via the MCP sidecar.
+     *
+     * This fetches the workflow file from ComfyUI server on-demand without
+     * needing to copy files to the MCP server's local folder. The workflow
+     * is fetched fresh for each execution.
+     *
+     * @param  string $workflowName  Workflow filename (e.g. 'faceswap.json' or 'faceswap')
+     * @return array|null           Decoded workflow JSON array, or null on failure
+     */
+    public function mcpFetchWorkflowFromComfyUI(string $workflowName): ?array
+    {
+        $this->assertMcpEnabled('mcpFetchWorkflowFromComfyUI');
+
+        // Ensure .json extension
+        $workflowName = rtrim($workflowName, '.');
+        if (! str_ends_with(strtolower($workflowName), '.json')) {
+            $workflowName .= '.json';
+        }
+
+        // Also send the spaces variant — Python tool will try both if the primary name fails.
+        // Stored names may have underscores substituted for spaces at import time,
+        // but the actual file on ComfyUI may still use spaces.
+        $workflowNameSpaces = str_replace('_', ' ', $workflowName);
+
+        $result = $this->mcpCall('get_workflow_from_comfyui', [
+            'workflow_name'          => $workflowName,
+            'workflow_name_fallback' => $workflowNameSpaces,
+        ]);
+
+        if (isset($result['error'])) {
+            Log::warning("McpService::mcpFetchWorkflowFromComfyUI: error for '{$workflowName}'", [
+                'error' => $result['error'],
+            ]);
+            return null;
+        }
+
+        $json = $result['workflow_json'] ?? null;
+
+        if (! $json || ! is_string($json)) {
+            Log::warning("McpService::mcpFetchWorkflowFromComfyUI: no workflow_json in response for '{$workflowName}'", [
+                'result' => $result,
+            ]);
+            return null;
+        }
+
+        $decoded = json_decode($json, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            Log::error("McpService::mcpFetchWorkflowFromComfyUI: MCP returned invalid JSON for '{$workflowName}'", [
+                'error' => json_last_error_msg(),
+            ]);
+            return null;
+        }
+
+        return $decoded;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Direct ComfyUI fetch (no MCP)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fetch a workflow JSON directly from ComfyUI's userdata API.
+     *
+     * This fetches the workflow file from ComfyUI server on-demand without
+     * using the MCP sidecar. Use this when workflows are stored on ComfyUI
+     * and you don't want to copy them anywhere.
+     *
+     * @param  string $workflowName  Workflow filename (e.g. 'faceswap.json')
+     * @return array|null           Decoded workflow JSON array, or null on failure
+     */
+    public function fetchComfyuiWorkflow(string $workflowName): ?array
+    {
+        // Clean up the workflow name - remove leading slashes and ensure proper path
+        $workflowName = ltrim($workflowName, '/');
+
+        // If it doesn't end with .json, add it
+        if (! str_ends_with(strtolower($workflowName), '.json')) {
+            $workflowName .= '.json';
+        }
+
+        Log::info("McpService::fetchComfyuiWorkflow: fetching from {$workflowName}");
+
+        try {
+            $response = $this->get("/api/workflow/" . urlencode($workflowName));
+
+            if ($response->status() === 404) {
+                // Try without folder prefix (some ComfyUI setups)
+                $basename = basename($workflowName);
+                Log::warning("McpService::fetchComfyuiWorkflow: workflow not found at {$workflowName}, trying {$basename}");
+                $response = $this->get("/api/workflow/" . urlencode($basename));
+
+                if ($response->status() === 404) {
+                    Log::warning("McpService::fetchComfyuiWorkflow: workflow not found: {$workflowName}");
+                    return null;
+                }
+            }
+
+            if (! $response->successful()) {
+                Log::warning("McpService::fetchComfyuiWorkflow: ComfyUI returned {$response->status()} for {$workflowName}");
+                return null;
+            }
+
+            $data = $response->json();
+
+            Log::info("McpService::fetchComfyuiWorkflow: ComfyUI RAW RESPONSE", [
+                'status'       => $response->status(),
+                'body_preview' => substr($response->body(), 0, 300),
+            ]);
+
+            // ❗ Detect wrong response (directory listing instead of workflow JSON)
+            if (is_array($data) && isset($data[0]) && is_string($data[0])) {
+                Log::error("McpService::fetchComfyuiWorkflow: Received file list instead of workflow JSON", [
+                    'workflow'         => $workflowName,
+                    'response_preview' => array_slice($data, 0, 5),
+                ]);
+                return null;
+            }
+
+            // Handle nested workflow format (ComfyUI sometimes wraps it)
+            if (is_array($data) && isset($data['workflow'])) {
+                $data = $data['workflow'];
+            }
+
+            // Convert from node format to API format if needed
+            if (is_array($data) && isset($data['nodes']) && ! $this->hasApiFormat($data)) {
+                $data = $this->convertNodesToApiFormat($data);
+            }
+
+            return $data;
+
+        } catch (\Exception $e) {
+            Log::error("McpService::fetchComfyuiWorkflow failed for {$workflowName}", [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Check if workflow data is in ComfyUI API format (has class_type keys).
+     */
+    protected function hasApiFormat(array $data): bool
+    {
+        foreach ($data as $node) {
+            if (is_array($node) && isset($node['class_type'])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Convert ComfyUI node format to API format.
+     */
+    protected function convertNodesToApiFormat(array $workflowData): array
+    {
+        $apiNodes = [];
+
+        foreach ($workflowData['nodes'] ?? [] as $node) {
+            $nodeId = (string) ($node['id'] ?? '');
+            $inputs = [];
+
+            foreach ($node['inputs'] ?? [] as $input) {
+                if (isset($input['link'])) {
+                    continue; // Skip linked inputs
+                }
+                $inputs[$input['name']] = $input['widget']['value'] ?? null;
+            }
+
+            $apiNodes[$nodeId] = [
+                'inputs'     => $inputs,
+                'class_type' => $node['type'] ?? 'unknown',
+            ];
+        }
+
+        return $apiNodes;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MCP Transport (private)
+    // ─────────────────────────────────────────────────────────────────────────
+
     private function mcpCall(string $tool, array $params = []): array
     {
-        // ── NOTE: server.py runs with stateless_http=True ─────────────────────
-        // Each POST to /mcp is fully self-contained. No initialize handshake,
-        // no Mcp-Session-Id. We call tools/call directly — one round trip.
-
         $headers = [
             'Content-Type' => 'application/json',
             'Accept'       => 'application/json, text/event-stream',
         ];
 
-        // arguments must be a JSON object ({}) not array ([]).
-        // PHP serialises an empty [] as JSON array — force (object) for empty params.
         $arguments = empty($params) ? (object) [] : $params;
 
         $payload = [
@@ -644,9 +896,6 @@ class McpService
             );
         }
 
-        // ── Parse SSE response ────────────────────────────────────────────────
-        // streamable-http always wraps in SSE: "event: message\ndata: {...}\n\n"
-        // Walk every data: line and keep the last valid JSON object.
         $body = $response->body();
         $data = null;
 
@@ -671,19 +920,12 @@ class McpService
             );
         }
 
-        // Surface JSON-RPC errors (e.g. tool not found, invalid params)
         if (isset($data['error'])) {
             throw new RuntimeException(
                 "MCP tool '{$tool}' error: " . ($data['error']['message'] ?? json_encode($data['error']))
             );
         }
 
-        // ── Unwrap FastMCP content envelope ───────────────────────────────────
-        // FastMCP wraps every tool result in:
-        //   {"result": {"content": [{"type": "text", "text": "<payload>"}], "isError": false}}
-        //
-        // If the tool returned JSON, decode the text block.
-        // If the tool returned a plain string, surface it under '_text'.
         $result = $data['result'] ?? $data;
 
         if (isset($result['content']) && is_array($result['content'])) {
@@ -691,9 +933,9 @@ class McpService
                 if (($block['type'] ?? '') === 'text' && isset($block['text'])) {
                     $inner = json_decode($block['text'], true);
                     if (json_last_error() === JSON_ERROR_NONE && is_array($inner)) {
-                        return $inner;               // ← tool returned JSON object/array
+                        return $inner;
                     }
-                    return ['_text' => $block['text']]; // ← tool returned plain string
+                    return ['_text' => $block['text']];
                 }
             }
         }
@@ -701,10 +943,6 @@ class McpService
         return $result;
     }
 
-    /**
-     * Assert that the MCP sidecar is enabled before calling MCP-only methods.
-     * Throws a clear error rather than silently doing nothing.
-     */
     private function assertMcpEnabled(string $method): void
     {
         if (! $this->mcpEnabled) {

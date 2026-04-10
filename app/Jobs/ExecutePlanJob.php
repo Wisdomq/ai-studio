@@ -71,6 +71,22 @@ class ExecutePlanJob implements ShouldQueue
 
     // ── Main loop ─────────────────────────────────────────────────────────────
 
+    /**
+     * Layer-aware execution loop.
+     *
+     * Steps are grouped into execution layers computed by OrchestratorAgent.
+     * All steps in layer N complete before any step in layer N+1 starts.
+     * Within a layer, steps run one at a time (GPU constraint), but they are
+     * conceptually parallel — they do not depend on each other.
+     *
+     * This handles the fan-in pattern correctly:
+     *   Layer 0: [text→image (scene)]  [text→image (face)]   ← independent
+     *   Layer 1: [image→video]                               ← needs layer-0 image
+     *   Layer 2: [faceswap]                                  ← needs layer-1 video + layer-0 image
+     *
+     * By the time faceswap runs, ALL layer-0 AND layer-1 steps are complete,
+     * so both its inputs (image from layer-0 and video from layer-1) are available.
+     */
     protected function runPlanLoop(WorkflowPlan $plan, McpService $mcp, int $deadline): void
     {
         while (true) {
@@ -87,7 +103,7 @@ class ExecutePlanJob implements ShouldQueue
                 break;
             }
 
-            // Any hard failures?
+            // Any hard failures or cancellations?
             $failed = $steps->first(fn (WorkflowPlanStep $s) => $s->isFailed());
             if ($failed) {
                 throw new \RuntimeException("Step {$failed->step_order} failed: {$failed->error_message}");
@@ -98,24 +114,54 @@ class ExecutePlanJob implements ShouldQueue
                 throw new \RuntimeException("Step {$cancelled->step_order} was cancelled by the user.");
             }
 
-            // Check for orphaned steps - skip them, they have comfy_job_id
+            // Handle orphaned steps
             $orphaned = $steps->first(fn (WorkflowPlanStep $s) => $s->isOrphaned());
             if ($orphaned) {
                 Log::info("ExecutePlanJob: Found orphaned step {$orphaned->step_order}, skipping to next");
                 continue;
             }
 
-            // Find next pending step whose dependencies are met
-            $next = $steps->first(function (WorkflowPlanStep $s) use ($plan) {
-                return $s->isPending() && $s->isReady($plan);
+            // ── Determine active layer ────────────────────────────────────────
+            // Active layer = lowest layer that still has pending steps.
+            // We never start a step in layer N until ALL steps in layers 0..N-1
+            // are complete — this is the core of the layer-aware guarantee.
+            $activeLayer = $steps
+                ->filter(fn (WorkflowPlanStep $s) => $s->isPending())
+                ->min('execution_layer');
+
+            if ($activeLayer === null) {
+                // No pending steps — all are running, awaiting approval, or complete
+                sleep(self::POLL_INTERVAL_SECONDS);
+                continue;
+            }
+
+            // Guard: all layers below active must be fully complete
+            $lowerLayersPending = $steps->filter(
+                fn (WorkflowPlanStep $s) => $s->execution_layer < $activeLayer && ! $s->isCompleted()
+            );
+
+            if ($lowerLayersPending->isNotEmpty()) {
+                Log::debug("ExecutePlanJob: Waiting for lower layers to complete before layer {$activeLayer}", [
+                    'pending_lower' => $lowerLayersPending->pluck('step_order')->all(),
+                ]);
+                sleep(self::POLL_INTERVAL_SECONDS);
+                continue;
+            }
+
+            // Find the next pending step in the active layer that is ready to run
+            $next = $steps->first(function (WorkflowPlanStep $s) use ($plan, $activeLayer) {
+                return $s->isPending()
+                    && $s->execution_layer === $activeLayer
+                    && $s->isReady($plan);
             });
 
             if ($next !== null) {
+                Log::info("ExecutePlanJob: Executing step {$next->step_order} (layer {$activeLayer})");
                 $this->executeStep($next, $plan, $mcp, $deadline);
-                continue; // Loop immediately after submitting — don't sleep
+                continue; // Loop immediately after submitting
             }
 
-            // No step ready — waiting for approval or dependency
+            // No step ready yet in active layer — waiting for approval or dependency
             sleep(self::POLL_INTERVAL_SECONDS);
         }
     }
@@ -171,10 +217,31 @@ class ExecutePlanJob implements ShouldQueue
             }
 
             // Inject refined prompt + file placeholders into workflow JSON
-            $injectedJson = $step->workflow->injectPrompt(
-                $step->refined_prompt ?? $step->purpose,
-                $comfyInputFiles
-            );
+            // Determine execution path:
+            // 1. ComfyUI-direct: fetch from ComfyUI server via comfy_workflow_name
+            // 2. MCP live-fetch: fetch from MCP server via mcp_workflow_id
+            // 3. Stored JSON: use workflow_json from database
+            $prompt = $step->refined_prompt ?? $step->purpose;
+
+            if ($step->workflow->isComfyuiDirect()) {
+                $workflowName = $step->workflow->comfy_workflow_name;
+                Log::info("ExecutePlanJob: Using ComfyUI-direct path via MCP for workflow: {$workflowName}");
+                $graph = $mcp->mcpFetchWorkflowFromComfyUI($workflowName);
+                if ($graph === null) {
+                    throw new \RuntimeException("Failed to fetch workflow from ComfyUI for '{$workflowName}'");
+                }
+                $injectedJson = $step->workflow->injectPromptIntoGraph($graph, $prompt, $comfyInputFiles);
+            } elseif ($step->workflow->isMcpLiveFetch()) {
+                $workflowId = $step->workflow->mcp_workflow_id;
+                Log::info("ExecutePlanJob: Using MCP live-fetch path for workflow: {$workflowId}");
+                $graph = $mcp->mcpFetchWorkflowGraph($workflowId);
+                if ($graph === null) {
+                    throw new \RuntimeException("Failed to fetch workflow graph from MCP for '{$workflowId}'");
+                }
+                $injectedJson = $step->workflow->injectPromptIntoGraph($graph, $prompt, $comfyInputFiles);
+            } else {
+                $injectedJson = $step->workflow->injectPrompt($prompt, $comfyInputFiles);
+            }
 
             Log::info("ExecutePlanJob: Submitting step {$step->step_order} to ComfyUI", [
                 'workflow'       => $step->workflow->name,
@@ -450,16 +517,19 @@ class ExecutePlanJob implements ShouldQueue
         }
 
         // ── 3. Dependency outputs from prior steps ─────────────────────────────
-        foreach ($step->depends_on ?? [] as $depOrder) {
-            $dep = $plan->steps->firstWhere('step_order', $depOrder);
+        foreach ($step->depends_on ?? [] as $key => $value) {
+            $stepOrder  = is_string($key) ? $value : $key;
+            $neededType = is_string($key) ? $key : null;
+
+            $dep = $plan->steps->firstWhere('step_order', $stepOrder);
 
             if (! $dep) {
-                throw new \RuntimeException("Dependency step {$depOrder} not found for step {$step->step_order}");
+                throw new \RuntimeException("Dependency step {$stepOrder} not found for step {$step->step_order}");
             }
 
             if (! $dep->output_path) {
                 throw new \RuntimeException(
-                    "Dependency step {$depOrder} has no output. Cannot execute step {$step->step_order}."
+                    "Dependency step {$stepOrder} has no output. Cannot execute step {$step->step_order}."
                 );
             }
 
@@ -467,17 +537,60 @@ class ExecutePlanJob implements ShouldQueue
                 throw new \RuntimeException("Dependency output file missing: {$dep->output_path}");
             }
 
-            $depOutputType = $dep->workflow->output_type ?? null;
-            if (! $depOutputType) {
+            $fileType = $neededType ?? ($dep->workflow->output_type ?? null);
+
+            if (! $fileType) {
                 continue;
             }
 
-            if (isset($files[$depOutputType])) {
-                continue; // Step-level or plan-level upload already covers this type
+            if (isset($files[$fileType])) {
+                continue;
             }
 
-            $files[$depOutputType] = $dep->output_path;
-            Log::info("ExecutePlanJob: Dependency step {$depOrder} output → {$depOutputType}: {$dep->output_path}");
+            $files[$fileType] = $dep->output_path;
+            Log::info("ExecutePlanJob: Dependency step {$stepOrder} output → {$fileType}: {$dep->output_path}");
+        }
+
+        // ── 4. Safety-net: scan all prior completed steps for still-uncovered types ──
+        //
+        // Catches two scenarios:
+        //   a) depends_on map has a gap (e.g. LLM omitted a workflow from the READY signal
+        //      so no step in the plan produces the needed type via explicit dependency).
+        //   b) A step in the same execution layer happens to produce a needed type that
+        //      was not wired explicitly — the layer system guarantees it completed first.
+        //
+        // Scans backwards (latest-match-wins) to be consistent with the planner.
+        $requiredTypes = $step->workflow->input_types ?? [];
+
+        if (! empty($requiredTypes)) {
+            $uncoveredTypes = array_diff($requiredTypes, array_keys($files));
+
+            if (! empty($uncoveredTypes)) {
+                $priorSteps = $plan->steps
+                    ->filter(fn (WorkflowPlanStep $s) =>
+                        $s->step_order < $step->step_order
+                        && $s->isCompleted()
+                        && ! empty($s->output_path)
+                        && Storage::disk('public')->exists($s->output_path)
+                    )
+                    ->sortByDesc('step_order')
+                    ->values();
+
+                foreach ($uncoveredTypes as $neededType) {
+                    foreach ($priorSteps as $prior) {
+                        $priorType = $prior->workflow->output_type
+                            ?? $this->mediaTypeFromPath($prior->output_path);
+
+                        if ($priorType !== $neededType) {
+                            continue;
+                        }
+
+                        $files[$neededType] = $prior->output_path;
+                        Log::info("ExecutePlanJob: Safety-net resolved {$neededType} from step {$prior->step_order} → {$prior->output_path}");
+                        break;
+                    }
+                }
+            }
         }
 
         return $files;

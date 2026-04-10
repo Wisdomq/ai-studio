@@ -53,93 +53,38 @@ class OrchestratorAgent
     protected function buildSystemPrompt(string $capabilityList): string
     {
         return <<<SYSPROMPT
-You are a friendly, creative AI media‑generation assistant. You help users create images, videos, and audio through natural conversation and you can stitch together several generation steps into a single "multimodal job".
+You are a warm, creative assistant that helps users generate images, videos, and audio.
 
-AVAILABLE WORKFLOWS:
+CRITICAL RULE: Every reply MUST end with a signal on its own final line. Always. No exceptions.
+
+WORKFLOWS:
 {$capabilityList}
 
-════════════════════════════════════════
-DECISION TREE — evaluate steps in order, stop at the first match.
-════════════════════════════════════════
+HOW TO DECIDE:
+- User sends INPUT:type:filename → find ONE workflow needing that input type → READY:<id>
+- One workflow can do the whole job → READY:<id>
+- Multiple workflows could each do it alone → AMBIGUOUS:<id1>,<id2>
+- User wants a chain ("generate X then turn it into Y") → READY:<id1>,<id2>
+- Required step has no matching workflow → CREATE_WORKFLOW:<what is missing>
+- Pure conversation, no creation request → reply warmly, no signal yet
 
-STEP 0 — USER‑PROVIDED INPUT FILES (check first!)
-  • If the user's message contains INPUT:media_type:filename tokens (e.g., INPUT:image:photo.jpg),
-    those are files the user already has and wants to use as direct input.
-  • Find a SINGLE workflow whose input_types EXACTLY match the provided file types.
-    Example: user provides INPUT:image:photo.jpg → look for workflow needing "image" input.
-  • If a matching workflow exists → READY:<id> (single workflow, use the user's file as input).
-  • If NO workflow matches the provided input types → explain the limitation and ask what to do.
-  • DO NOT create multi‑step pipelines when the user has already provided their input files.
-    The provided file IS the input — just process it directly.
+SIGNALS (last line of every reply — pick exactly one):
+READY:<id>
+READY:<id1>,<id2>
+AMBIGUOUS:<id1>,<id2>
+CREATE_WORKFLOW:<description>
 
-STEP 1 — SINGLE WORKFLOW GENERATION (always try this first)
-  • Scan the workflow list for one whose output_type directly satisfies
-    what the user wants to produce.
-  • If ONE workflow can deliver the final result end‑to‑end on its own → READY:<id>
-  • If MULTIPLE workflows could each satisfy it alone → AMBIGUOUS:<id1>,<id2>
-  • ONLY proceed to STEP 2 if zero single workflows can satisfy the request alone.
-  • A user asking for a video, image, or audio is a generation request — always
-    prefer the most direct single workflow over any multi‑step alternative.
-    Do NOT use STEP 2 simply because a multi‑step path also exists.
+For READY with multiple IDs, add one INTENT line per step right before the signal:
+INTENT:<what step 1 should do>
+INTENT:<what step 2 should do>
+READY:<id1>,<id2>
 
-STEP 2 — MULTI‑WORKFLOW ORCHESTRATION (fallback — only if STEP 1 found nothing)
-  • No single workflow covers the full request on its own.
-  • The user explicitly describes a chain of distinct outputs, e.g.:
-    "generate an image then animate it", "make a picture and turn it into a video",
-    "create audio for this video clip".
-  • Identify each atomic output (image‑gen, video‑from‑image, audio‑from‑text …).
-  • For every atomic output:
-        – If a matching workflow exists → record its ID.
-        – If none exists → flag the missing step (see STEP 3‑B).
-  • If all required steps have existing workflows, return them in execution order:
-        READY:<id_step1>,<id_step2>,...
-  • After the READY line, add one INTENT: line per step (in order), each capturing
-    the user's original phrasing for THAT specific step. Extract the exact portion
-    of the user's request that applies to this step. Example:
-        INTENT:Generate an image of a cat walking in the park
-        INTENT:Animate the cat image into a video showing it running
-  • If at least one required step is missing → fall‑through to STEP 3‑B instead.
-
-STEP 3‑A — BUILD A NEW WORKFLOW (explicit request)
-  • User explicitly asks for a new pipeline ("I need a workflow that…",
-    "add support for …", "create a pipeline that …").
-  • ALL must be true:
-        – They use a trigger such as "workflow", "pipeline", "new capability",
-          "add support for", "create a workflow".
-        – The request is NOT a simple media‑generation request.
-  • Respond warmly, then finish with:
-        CREATE_WORKFLOW:<free‑text description of the wanted step>
-
-STEP 3‑B — BUILD A NEW WORKFLOW (implicit missing step)
-  • While evaluating STEP 2 the agent discovers one (or more) required
-    sub‑steps that have no existing workflow.
-  • Automatically propose creating the missing workflow(s) — even if the user
-    never mentioned the word "workflow".
-  • Reply with a brief acknowledgement and then end with:
-        CREATE_WORKFLOW:<concise description of the missing capability>
-
-STEP 4 — NOTHING FITS
-  • No generation intent detected, or the request is outside the scope.
-  • Respond helpfully and ask what the user would like to create.
-
-════════════════════════════════════════
-SIGNALS — always the very last line of the assistant's output, nothing after it:
-  READY:<workflow_id>                (single or comma‑separated list)
-  INTENT:<step‑specific prompt>      (one per step, in order, after READY line)
-  AMBIGUOUS:<id1>,<id2>
-  CREATE_WORKFLOW:<intent>
-
-RULES
-  • When user provides INPUT:media_type:filename, use that file directly as the workflow input — do NOT create multi‑step pipelines.
-  • Prefer SINGLE workflow generation over multi‑step unless the user explicitly describes chaining outputs.
-  • WHEN IN DOUBT → use READY with the *most likely* single workflow
-    (never fall back to CREATE_WORKFLOW unless a step is truly missing).
-  • "Create an image/video/audio" = GENERATION → READY.
-  • "Create a workflow/pipeline" = WORKFLOW BUILDING → CREATE_WORKFLOW.
-  • Ask at most ONE clarifying question **before** emitting a signal.
-  • Never mention signals, IDs, or any technical jargon to the user.
-  • Be warm, concise, enthusiastic, and always keep the focus on the creative
-    outcome the user wants.
+EXTRA RULES:
+- When in doubt, use READY with the most likely workflow. Do not overthink.
+- Never use READY:<id1>,<id2> if one workflow can do the full job alone.
+- Never repeat the same ID twice in a row (READY:1,1,2 is wrong, use READY:1,2).
+- Never mention workflow IDs, signal names, or technical terms to the user.
+- Keep replies short and friendly.
 SYSPROMPT;
     }
 
@@ -334,18 +279,23 @@ SYSPROMPT;
             $allReadyIds = array_merge($allReadyIds, $proseIds);
         }
 
-        // ── Phase 3: Preserve order (no deduplication) ───────────────────────
-        // Each occurrence of an ID represents a distinct plan step, even if the
-        // same workflow ID appears multiple times (e.g. READY:1,1,2).
+        // ── Phase 3: Remove consecutive duplicates ───────────────────────────
+        // Consecutive duplicates (e.g. READY:1,1,2) are almost always LLM
+        // copy-paste errors. Collapse them while preserving non-consecutive
+        // repeats which may represent intentional "generate multiple outputs".
         $ids = array_values(array_filter($allReadyIds, fn ($id) => $id > 0));
+        $originalCount = count($ids);
+        $ids = $this->removeConsecutiveDuplicates($ids);
 
         Log::info('OrchestratorAgent: Collected IDs from LLM response', [
             'ids' => $ids,
-            'ready_signal_ids' => $allReadyIds,
+            'original_ids' => $allReadyIds,
+            'deduplicated' => $originalCount !== count($ids),
+            'original_count' => $originalCount,
+            'deduped_count' => count($ids),
         ]);
 
         // ── Phase 3b: Extract step-specific intents from INTENT: lines ───────
-        // Each INTENT: line captures the user's original phrasing for a specific step.
         $stepIntents = [];
         if (preg_match_all('/^INTENT:\s*(.+)$/mi', $rawResponse, $intentMatches)) {
             foreach ($intentMatches[1] as $intent) {
@@ -359,6 +309,31 @@ SYSPROMPT;
         Log::info('OrchestratorAgent: Extracted step intents', [
             'step_intents' => $stepIntents,
         ]);
+
+        // ── Phase 3c: Parse explicit dependency graph from DEPS: line (bonus) ─
+        // Not required — emitted only by capable models or complex pipelines.
+        // Format: DEPS:<step_idx>:<type>=<src_idx>[,<type>=<src_idx>]|...
+        // Example: DEPS:1:image=0|2:image=0,video=1
+        $explicitDeps = [];
+        if (preg_match('/^DEPS:\s*(.+)$/mi', $rawResponse, $depsMatch)) {
+            foreach (explode('|', trim($depsMatch[1])) as $entry) {
+                if (! preg_match('/^(\d+):(.+)$/', trim($entry), $em)) {
+                    continue;
+                }
+                $depMap = [];
+                foreach (explode(',', $em[2]) as $pair) {
+                    if (preg_match('/^(\w+)=(\d+)$/', trim($pair), $pm)) {
+                        $depMap[$pm[1]] = (int) $pm[2];
+                    }
+                }
+                if (! empty($depMap)) {
+                    $explicitDeps[(int) $em[1]] = $depMap;
+                }
+            }
+            Log::info('OrchestratorAgent: Parsed explicit dependency graph', [
+                'deps' => $explicitDeps,
+            ]);
+        }
 
         // ── Phase 4: Validate against DB ─────────────────────────────────────
         if (! empty($ids)) {
@@ -382,7 +357,7 @@ SYSPROMPT;
                     ->values();
 
                 $plan = count($orderedWorkflows) > 1
-                    ? $this->buildMultiStepPlan($orderedWorkflows, $conversationMessages, $stepIntents)
+                    ? $this->buildMultiStepPlan($orderedWorkflows, $conversationMessages, $stepIntents, $explicitDeps)
                     : $this->buildPlan($orderedWorkflows->first(), $conversationMessages);
 
                 Log::info('OrchestratorAgent: READY signal detected', [
@@ -544,29 +519,57 @@ SYSPROMPT;
 
     /**
      * Build a multi-step plan from multiple workflows.
-     * Each step depends on the previous step's output.
      *
-     * @param \Illuminate\Support\Collection $workflows Ordered collection of workflows
-     * @param array $conversationMessages Conversation history for extracting user intent
-     * @param array $stepIntents Step-specific intents extracted from LLM INTENT: lines
+     * Produces a DAG-aware plan by:
+     *   1. Assigning keyed depends_on maps (latest-match-wins) to every step.
+     *   2. Computing an execution_layer for every step so the executor can run
+     *      independent steps as a group before moving to dependent steps.
+     *
+     * Execution layers work like topological levels in the DAG:
+     *   - Steps with no dependencies → Layer 0 (run first, conceptually parallel)
+     *   - Steps depending only on Layer 0 → Layer 1
+     *   - Steps depending on Layer N or lower → Layer N+1
+     *
+     * Example — faceswap pipeline:
+     *   Step 0: text→image (scene)          → Layer 0  depends_on: {}
+     *   Step 1: text→image (face portrait)  → Layer 0  depends_on: {}
+     *   Step 2: image→video                 → Layer 1  depends_on: {image: 0}
+     *   Step 3: faceswap (needs image+video) → Layer 2  depends_on: {image: 1, video: 2}
+     *
+     * The executor runs all Layer 0 steps first, then Layer 1, then Layer 2.
+     * This guarantees that when faceswap runs, both its video AND its face image
+     * are already produced — regardless of how the LLM ordered the READY signal.
+     *
+     * When the LLM emits a DEPS: line, those explicit deps override the
+     * algorithmic fallback for the steps they cover.
+     *
+     * @param \Illuminate\Support\Collection $workflows           Ordered collection of workflows
+     * @param array                          $conversationMessages Conversation history
+     * @param array                          $stepIntents          Step intents from INTENT: lines
+     * @param array                          $explicitDeps         Dep map from DEPS: line — [stepIdx => [type => srcIdx]]
      */
-    public function buildMultiStepPlan(\Illuminate\Support\Collection $workflows, array $conversationMessages = [], array $stepIntents = []): array
-    {
+    public function buildMultiStepPlan(
+        \Illuminate\Support\Collection $workflows,
+        array $conversationMessages = [],
+        array $stepIntents = [],
+        array $explicitDeps = []
+    ): array {
         $userIntent = $this->extractLastUserIntent($conversationMessages);
 
         $plan  = [];
         $total = count($workflows);
 
+        // ── Pass 1: assign depends_on for every step ──────────────────────────
         foreach ($workflows as $index => $workflow) {
-            // Each step depends on the immediately preceding step's output
-            $dependsOn = $index > 0 ? [$index - 1] : [];
+            if ($index === 0) {
+                $dependsOn = [];
+            } elseif (isset($explicitDeps[$index])) {
+                $dependsOn = $explicitDeps[$index];
+            } else {
+                $dependsOn = $this->buildKeyedDependencies($workflows, $index);
+            }
 
-            // Per-step purpose: step 0 gets the full user intent (generating from
-            // the prompt), subsequent steps describe their transformation role.
-            $purpose = $this->buildMultiStepPurpose($workflow, $userIntent, $index, $total);
-
-            // Per-step prompt_hint: prefer step-specific intent from LLM if available,
-            // fall back to user intent for step 0, then empty for subsequent steps.
+            $purpose    = $this->buildMultiStepPurpose($workflow, $userIntent, $index, $total);
             $promptHint = $stepIntents[$index] ?? ($index === 0 ? $userIntent : '');
 
             $plan[] = [
@@ -576,10 +579,113 @@ SYSPROMPT;
                 'purpose'       => $purpose,
                 'prompt_hint'   => $promptHint,
                 'depends_on'    => $dependsOn,
+                'execution_layer' => 0, // filled in Pass 2
             ];
         }
 
+        // ── Pass 2: compute execution_layer for every step ────────────────────
+        // Layer = max(layer of each dependency) + 1, or 0 if no dependencies.
+        // Must be computed in step_order sequence so earlier layers are known
+        // before later ones reference them.
+        $layerByOrder = [];
+        foreach ($plan as &$step) {
+            $layer = $this->computeExecutionLayer($step, $layerByOrder);
+            $step['execution_layer'] = $layer;
+            $layerByOrder[$step['step_order']] = $layer;
+        }
+        unset($step);
+
+        Log::info('OrchestratorAgent: Execution layers assigned', [
+            'layers' => $layerByOrder,
+        ]);
+
         return $plan;
+    }
+
+    /**
+     * Compute the execution layer for a single step given already-computed
+     * layers for all prior steps.
+     *
+     * @param array $step          The step array (must include depends_on)
+     * @param array $layerByOrder  Map of step_order => execution_layer for all prior steps
+     * @return int
+     */
+    protected function computeExecutionLayer(array $step, array $layerByOrder): int
+    {
+        $deps = $step['depends_on'] ?? [];
+
+        if (empty($deps)) {
+            return 0;
+        }
+
+        $maxDepLayer = 0;
+        foreach ($deps as $key => $value) {
+            // keyed format: $key = type string, $value = step_order
+            // flat format:  $key = array index,  $value = step_order
+            $depStepOrder = is_string($key) ? (int) $value : (int) $value;
+            $depLayer     = $layerByOrder[$depStepOrder] ?? 0;
+            $maxDepLayer  = max($maxDepLayer, $depLayer);
+        }
+
+        return $maxDepLayer + 1;
+    }
+
+    /**
+     * Build a keyed dependency map for a step at the given index.
+     *
+     * Walks BACKWARDS through previous steps (latest-match-wins) so that when
+     * the same output type appears more than once, the most recently produced
+     * file wins. This is always semantically correct: in any well-ordered
+     * pipeline the closest upstream producer of a type is the intended input.
+     *
+     * Example — faceswap (needs ['image', 'video']):
+     *   Step 0: text  → image  (scene)
+     *   Step 1: text  → image  (face portrait)   ← independent of step 0
+     *   Step 2: image → video                    ← depends on step 0
+     *   Step 3: faceswap
+     *
+     *   Backward walk from index 3:
+     *     index 2 → outputs video  → assign video = 2
+     *     index 1 → outputs image  → assign image = 1  (face portrait — correct!)
+     *     both types covered → stop
+     *
+     *   Forward walk (old, wrong):
+     *     index 0 → outputs image  → assign image = 0  (scene — wrong!)
+     *     index 2 → outputs video  → assign video = 2
+     *
+     * @param \Illuminate\Support\Collection $workflows All workflows in order
+     * @param int $index Index of the step to build dependencies for
+     * @return array Keyed dependency map: [inputType => stepOrder]
+     */
+    protected function buildKeyedDependencies(\Illuminate\Support\Collection $workflows, int $index): array
+    {
+        $dependsOn = [];
+
+        if ($index === 0) {
+            return $dependsOn;
+        }
+
+        $currentWorkflow = $workflows[$index];
+        $neededTypes     = $currentWorkflow->input_types ?? [];
+
+        if (empty($neededTypes)) {
+            return $dependsOn;
+        }
+
+        // Walk BACKWARDS — latest-match-wins
+        for ($prevIndex = $index - 1; $prevIndex >= 0; $prevIndex--) {
+            $prevOutput = $workflows[$prevIndex]->output_type ?? null;
+
+            if ($prevOutput && in_array($prevOutput, $neededTypes) && ! isset($dependsOn[$prevOutput])) {
+                $dependsOn[$prevOutput] = $prevIndex;
+            }
+
+            if (count($dependsOn) === count($neededTypes)) {
+                break;
+            }
+        }
+
+        return $dependsOn;
     }
 
     protected function buildMultiStepPurpose(Workflow $workflow, string $userIntent, int $stepIndex, int $totalSteps): string
@@ -757,6 +863,8 @@ SYSPROMPT;
         // Remove signal lines wherever they appear — not just at the end.
         // Mistral 7b sometimes emits the signal mid-response or with trailing prose.
         $text = preg_replace('/^READY:[\d,\s]+.*$/im', '', $text);
+        $text = preg_replace('/^INTENT:.*$/im', '', $text);
+        $text = preg_replace('/^DEPS:.*$/im', '', $text);
         $text = preg_replace('/^AMBIGUOUS:[\d,\s]+.*$/im', '', $text);
         $text = preg_replace('/^CREATE_WORKFLOW:.*$/im', '', $text);
 
@@ -807,5 +915,33 @@ SYSPROMPT;
                 default     => new UserMessage($msg['content']),
             };
         }, $messages);
+    }
+
+    /**
+     * Remove consecutive duplicate workflow IDs.
+     *
+     * READY:1,1,2,2,3 → 1,2,3 (collapsed)
+     * READY:1,2,1,2    → 1,2,1,2 (preserved — non-consecutive)
+     *
+     * This handles the common LLM copy-paste error where the same ID
+     * appears multiple times in succession.
+     */
+    protected function removeConsecutiveDuplicates(array $ids): array
+    {
+        if (empty($ids)) {
+            return $ids;
+        }
+
+        $result = [];
+        $lastId = null;
+
+        foreach ($ids as $id) {
+            if ($id !== $lastId) {
+                $result[] = $id;
+                $lastId = $id;
+            }
+        }
+
+        return $result;
     }
 }
