@@ -1,58 +1,228 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# AI Studio 🎬
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A Laravel 12 web application for AI-powered creative generation. Users describe what they want in natural language, and the system plans, refines, and executes multi-step **ComfyUI workflows** to produce images, videos, and audio — all orchestrated by a local LLM via Ollama.
 
-## About Laravel
+---
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Overview
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+AI Studio is a full-stack agentic pipeline built on Laravel 12. It uses a conversational **OrchestratorAgent** backed by Ollama (default: `mistral:7b`) to interpret user intent, select the right ComfyUI workflows, and build an execution plan. Users can review and refine each step before dispatching jobs to a ComfyUI instance.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+The system supports single-workflow and multi-step DAG pipelines (e.g., generate an image → animate it → faceswap), with automatic dependency resolution and parallel execution layering.
 
-## Learning Laravel
+---
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+## Architecture
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+```
+User Request
+    │
+    ▼
+OrchestratorAgent (Ollama LLM)
+    │  Outputs signals: READY:<id>, AMBIGUOUS:<id1>,<id2>, CREATE_WORKFLOW:<desc>
+    ▼
+Plan Builder (pure PHP — no LLM JSON)
+    │  Builds DAG with execution layers & keyed depends_on maps
+    ▼
+Prompt Refinement (WorkflowOptimizerAgent)
+    │  LLM refines prompt for each step
+    ▼
+ExecutePlanJob (Laravel Queue)
+    │  Dispatches each step to ComfyUI in dependency order
+    ▼
+ComfyUI Instance → Generated Assets
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+---
 
-## Contributing
+## Key Components
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+### Agents (`app/Ai/Agents/`)
 
-## Code of Conduct
+| Agent | Description |
+|---|---|
+| `OrchestratorAgent` | Main conversational agent. Interprets user intent, emits structured signals (`READY`, `AMBIGUOUS`, `CREATE_WORKFLOW`), builds multi-step execution plans with DAG dependency resolution. |
+| `WorkflowOptimizerAgent` | Refines individual step prompts before execution. |
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### Services (`app/Services/`)
 
-## Security Vulnerabilities
+| Service | Description |
+|---|---|
+| `WorkflowBuilderService` | Builds new workflow JSON from user intent, validates nodes against ComfyUI, and saves to the database. |
+| `McpService` | Syncs workflows from a remote MCP (Model Context Protocol) source. |
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+### Skills (`app/Ai/Skills/`)
+
+| Skill | Description |
+|---|---|
+| `WorkflowBuilderSkill` | LLM-assisted workflow template generation and classification. |
+| `WorkflowTemplateLibrary` | Pre-built workflow template patterns. |
+
+### Jobs
+
+| Job | Description |
+|---|---|
+| `ExecutePlanJob` | Executes a workflow plan step-by-step, respecting execution layers (parallel-safe steps run as a group). |
+
+---
+
+## Routes
+
+### Studio Pipeline
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/studio` | Main interface — lists available workflows |
+| `POST` | `/studio/planner` | Submit user request to OrchestratorAgent |
+| `POST` | `/studio/plan/approve` | Approve generated plan |
+| `POST` | `/studio/plan/refine-step` | LLM-refine a specific step's prompt |
+| `POST` | `/studio/plan/{plan}/confirm` | Confirm a refined step |
+| `GET` | `/studio/plan/{plan}/review` | Review plan before dispatch |
+| `POST` | `/studio/plan/{plan}/dispatch` | Dispatch plan to ComfyUI |
+| `POST` | `/studio/plan/{plan}/queue` | Queue plan for later execution |
+| `GET` | `/studio/plan/{plan}/status` | Poll execution status |
+| `POST` | `/studio/plan/{plan}/step/{order}/approve` | Approve a completed step |
+| `POST` | `/studio/plan/{plan}/step/{order}/cancel` | Cancel a running step |
+| `GET` | `/studio/comfy-health` | ComfyUI health check (polled by frontend LED) |
+| `GET` | `/studio/generations` | Gallery of completed generations |
+
+### Admin
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/admin/workflows` | Manage available workflows |
+| `POST` | `/admin/workflows/sync` | Sync workflows from MCP |
+| `PATCH` | `/admin/workflows/{id}/toggle` | Enable/disable a workflow |
+| `POST` | `/admin/workflows/comfy-import` | Import workflow from ComfyUI |
+| `POST` | `/admin/workflows/comfy-import-json` | Import workflow from raw JSON |
+
+---
+
+## Orchestrator Agent Signals
+
+The `OrchestratorAgent` separates LLM concerns from plan construction. The LLM outputs only natural conversation plus a single structured signal on the final line:
+
+| Signal | Meaning |
+|---|---|
+| `READY:<id>` | Single workflow selected — build plan immediately |
+| `READY:<id1>,<id2>` | Multi-step chain — build DAG plan |
+| `AMBIGUOUS:<id1>,<id2>` | Multiple workflows could handle the request — ask user |
+| `CREATE_WORKFLOW:<desc>` | No matching workflow exists — prompt admin to add one |
+| `INTENT:<description>` | Per-step intent hint for multi-step plans (precedes READY) |
+| `DEPS:<map>` | Explicit dependency graph override (advanced models) |
+
+Degenerate LLM output (token repetition loops, high non-ASCII density) is detected and automatically retried once before returning a safe fallback message.
+
+---
+
+## Execution Layers (DAG)
+
+Multi-step plans are assigned execution layers so independent steps can run concurrently:
+
+```
+Step 0: text → image (scene)         Layer 0  — no deps
+Step 1: text → image (face portrait) Layer 0  — no deps
+Step 2: image → video                Layer 1  — depends on step 0 (image)
+Step 3: faceswap                     Layer 2  — depends on step 1 (image) + step 2 (video)
+```
+
+The executor processes all Layer 0 steps before Layer 1, guaranteeing upstream outputs exist when downstream steps run.
+
+---
+
+## AI Providers
+
+Configured via [Prism PHP](https://github.com/echolabsdev/prism) (`config/prism.php`):
+
+- **Ollama** (default, local) — `http://172.16.10.11:11435`
+- OpenAI, Anthropic, Mistral, Groq, Gemini, DeepSeek, xAI, ElevenLabs, OpenRouter, Perplexity, VoyageAI, Z.ai
+
+Set the default model in `StudioController`:
+```php
+protected string $model = 'mistral:7b';
+```
+
+---
+
+## Database Schema
+
+| Table | Description |
+|---|---|
+| `workflows` | Available ComfyUI workflow definitions (JSON, input/output types) |
+| `workflow_plans` | User generation sessions with status tracking |
+| `workflow_plan_steps` | Individual steps within a plan (order, prompt, execution layer, depends_on) |
+
+---
+
+## Setup
+
+### Requirements
+
+- PHP 8.3+
+- Laravel 12
+- Composer
+- Node.js + NPM
+- Ollama (with `mistral:7b` pulled)
+- ComfyUI instance
+
+### Installation
+
+```bash
+# Clone and install PHP dependencies
+composer install
+
+# Install frontend dependencies
+npm install && npm run build
+
+# Configure environment
+cp .env.example .env
+php artisan key:generate
+
+# Set your ComfyUI URL in .env
+COMFYUI_URL=http://your-comfyui-host:8188
+
+# Set Ollama URL
+OLLAMA_URL=http://your-ollama-host:11435
+
+# Run migrations
+php artisan migrate
+
+# Start queue worker
+php artisan queue:work
+
+# Start server
+php artisan serve
+```
+
+### Docker (Supervisor)
+
+A `docker/supervisor/supervisord.conf` is included for running the Laravel queue worker alongside the web server in a containerized environment.
+
+---
+
+## Admin Setup
+
+Before using the Studio, seed workflows via the admin panel at `/admin/workflows`. You can:
+- Import workflows directly from your ComfyUI instance
+- Import raw ComfyUI JSON
+- Sync from a remote MCP server
+- Toggle workflows active/inactive
+
+Each workflow should have its `input_types` and `output_type` set correctly (e.g., `image`, `video`, `audio`) so the Orchestrator can route requests correctly.
+
+---
+
+## Tech Stack
+
+- **Laravel 12** — PHP framework
+- **Prism PHP** — LLM provider abstraction
+- **Ollama** — local LLM inference
+- **ComfyUI** — image/video/audio generation backend
+- **Laravel Queues** — async job execution
+- **Blade** — templating
+
+---
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+This project is unlicensed. All rights reserved to the author.
