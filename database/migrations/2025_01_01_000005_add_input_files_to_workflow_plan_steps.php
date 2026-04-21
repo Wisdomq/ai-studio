@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Schema;
  * multiple input files — e.g. {"image": "comfyui-inputs/a.png", "audio": "comfyui-inputs/b.mp3"}.
  *
  * The legacy input_file_path (single string) column is intentionally left
- * in place for backward compatibility. ExecutePlanJob::collectDependencyFiles()
+ * in place for backward compatibility. DependencyFileService::collectDependencyFiles()
  * reads input_files first and falls back to input_file_path.
  */
 return new class extends Migration

@@ -44,61 +44,14 @@
 <div id="studio-app" class="min-h-screen flex flex-col">
 
     {{-- ── Header ───────────────────────────────────────────────────────────── --}}
-    <header class="bg-white border-b border-forest-100 px-6 py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm">
-        <a href="{{ route('studio.index') }}" class="flex items-center gap-3 hover:opacity-80 transition">
-            <div class="w-8 h-8 bg-forest-500 rounded-lg flex items-center justify-center">
-                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-                </svg>
-            </div>
-            <span class="text-lg font-semibold text-gray-900 tracking-tight">AI Studio</span>
-        </a>
-
-        <div class="flex items-center gap-3">
-            {{-- ComfyUI Status LED --}}
-            <div id="comfy-status" class="flex items-center gap-1.5" title="Checking ComfyUI...">
-                <span id="comfy-led" class="w-2.5 h-2.5 rounded-full bg-gray-300 transition-colors duration-300"></span>
-                <span id="comfy-label" class="text-xs text-gray-400">ComfyUI</span>
-            </div>
-
-            <div id="phase-indicator" class="text-xs font-medium text-forest-600 bg-forest-50 border border-forest-200 px-3 py-1 rounded-full">
-                Ready to create
-            </div>
-
-            {{-- Workflows panel trigger --}}
-            <button onclick="toggleWorkflowsPanel()"
-                title="Available Workflows"
-                class="relative p-2 text-gray-400 hover:text-forest-600 hover:bg-forest-50 rounded-xl transition">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
-                </svg>
-            </button>
-
-            {{-- Mood Board trigger --}}
-            <button id="btn-mood-board" onclick="toggleMoodBoard()"
-                title="Creative Mood Board"
-                class="relative p-2 text-gray-400 hover:text-forest-600 hover:bg-forest-50 rounded-xl transition">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/>
-                </svg>
-                <span id="mood-active-dot" class="hidden absolute top-1 right-1 w-2 h-2 bg-forest-500 rounded-full"></span>
-            </button>
-
-            {{-- Jobs panel trigger --}}
-            <button onclick="toggleJobsPanel(true)"
-                class="relative p-2 text-gray-400 hover:text-forest-600 hover:bg-forest-50 rounded-xl transition">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                </svg>
-                <span id="jobs-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] bg-forest-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1"></span>
-            </button>
-
-            <a href="{{ route('studio.generations') }}"
-               class="text-sm text-gray-500 hover:text-forest-600 transition font-medium">
-                My Generations
-            </a>
-        </div>
-    </header>
+    <x-studio-navbar 
+        currentPage="studio"
+        :showComfyStatus="true"
+        :showPhaseIndicator="true"
+        :showWorkflowsButton="true"
+        :showMoodBoardButton="true"
+        :showJobsButton="true"
+    />
 
     {{-- Top progress bar --}}
     <div id="top-progress" class="hidden h-0.5 bg-forest-100">
@@ -115,10 +68,23 @@
 
 {{-- ── Step execution template ──────────────────────────────────────────── --}}
 <template id="tpl-exec-step">
-    <div class="exec-step bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
+    <div class="exec-step bg-white border-2 rounded-2xl overflow-hidden shadow-sm transition-all hover:shadow-md">
         <div class="px-5 py-4 flex items-center justify-between">
-            <span class="step-name text-sm font-medium text-gray-800"></span>
+            <div class="flex-1 min-w-0">
+                <span class="step-name text-sm font-medium text-gray-800 block"></span>
+                <div class="step-dependencies text-xs text-gray-500 mt-1 hidden"></div>
+            </div>
             <span class="step-badge text-xs px-2.5 py-1 rounded-full font-medium"></span>
+        </div>
+        {{-- Cancel button (shown only when running) --}}
+        <button class="btn-cancel-step hidden items-center gap-1.5 px-4 py-2 mx-5 mb-3 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-lg text-xs font-medium transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            Cancel Generation
+        </button>
+        <div class="step-cancelled hidden border-t border-gray-100 bg-gray-50 px-5 py-3">
+            <p class="text-xs text-gray-600">This step was cancelled.</p>
         </div>
         <div class="step-result hidden border-t border-gray-100">
             <div class="step-media-wrap bg-gray-50"></div>

@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\ExecutePlanJob;
+use App\Jobs\CoordinatePlanJob;
 use App\Models\WorkflowPlan;
 use App\Models\WorkflowPlanStep;
 use App\Services\McpService;
@@ -74,7 +74,7 @@ class MonitorOrphanedJobs extends Command
 
             if (!$hasOrphans && !$hasRunning) {
                 $plan->markRunning();
-                ExecutePlanJob::dispatch($plan->id);
+                CoordinatePlanJob::dispatch($plan->id);
                 $this->info("Plan #{$plan->id} resumed - all orphaned steps resolved.");
             }
         }

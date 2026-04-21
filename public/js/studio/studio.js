@@ -44,6 +44,7 @@ function resetToPlanning() {
         planCardApprovals = {};
     }
 
+    // Clear all dynamic content
     document.getElementById('conversation').innerHTML    = '';
     document.getElementById('plan-card').classList.add('hidden');
     document.getElementById('multi-plan-cards')?.remove();
@@ -55,6 +56,29 @@ function resetToPlanning() {
     document.getElementById('refinement-steps').innerHTML  = '';
     document.getElementById('execution-steps').innerHTML   = '';
     document.getElementById('disambiguation-card')?.remove();
+    
+    // Remove error banners
+    document.getElementById('plan-failed-banner')?.remove();
+    
+    // Reset progress bar
+    const progressBar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+    const progressStatus = document.getElementById('progress-status');
+    const progressPercentage = document.getElementById('progress-percentage');
+    
+    if (progressBar) {
+        progressBar.style.width = '0%';
+        progressBar.className = 'bg-gradient-to-r from-forest-500 to-forest-600 h-3 rounded-full progress-bar-animated shadow-sm';
+    }
+    if (progressText) progressText.textContent = '0 / 0 steps';
+    if (progressStatus) progressStatus.textContent = 'Preparing...';
+    if (progressPercentage) progressPercentage.textContent = '0%';
+    
+    // Clear any active polling intervals
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
 
     setPhase('Ready to create');
     showProgress(false);

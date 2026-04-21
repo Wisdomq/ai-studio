@@ -8,4 +8,168 @@
 @theme {
     --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
+    
+    --color-forest-50: #f0fdf4;
+    --color-forest-100: #dcfce7;
+    --color-forest-200: #bbf7d0;
+    --color-forest-300: #86efac;
+    --color-forest-400: #4ade80;
+    --color-forest-500: #22c55e;
+    --color-forest-600: #16a34a;
+    --color-forest-700: #15803d;
+    --color-forest-800: #166534;
+    --color-forest-900: #14532d;
+}
+
+/* ── Enhanced Status Badges ──────────────────────────────────────────────── */
+
+.badge-pending {
+    @apply bg-gray-100 text-gray-600 border border-gray-200;
+}
+
+.badge-running {
+    @apply bg-blue-100 text-blue-700 border border-blue-200;
+    animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+.badge-approval {
+    @apply bg-amber-100 text-amber-700 border border-amber-200;
+    animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+.badge-completed {
+    @apply bg-green-100 text-green-700 border border-green-200;
+}
+
+.badge-failed {
+    @apply bg-red-100 text-red-700 border border-red-200;
+}
+
+.badge-cancelled {
+    @apply bg-gray-100 text-gray-500 border border-gray-200;
+}
+
+.badge-orphaned {
+    @apply bg-purple-100 text-purple-700 border border-purple-200;
+}
+
+@keyframes pulse-subtle {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.7;
+    }
+}
+
+/* ── Execution Step Cards ────────────────────────────────────────────────── */
+
+.exec-step[data-status="running"] {
+    @apply border-blue-300 shadow-lg;
+}
+
+.exec-step[data-status="completed"] {
+    @apply border-green-300;
+}
+
+.exec-step[data-status="failed"] {
+    @apply border-red-300;
+}
+
+.exec-step[data-status="awaiting_approval"] {
+    @apply border-amber-300 shadow-lg;
+}
+
+/* ── Progress Bar Animation ──────────────────────────────────────────────── */
+
+.progress-bar-animated {
+    transition: width 0.5s ease-out;
+}
+
+/* ── Slide In Animation ──────────────────────────────────────────────────── */
+
+@keyframes slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.slide-in {
+    animation: slide-in 0.3s ease-out;
+}
+
+
+/* ── Chat Messages ────────────────────────────────────────────────────────── */
+
+.fade-in {
+    animation: fade-in-up 0.3s ease-out;
+}
+
+@keyframes fade-in-up {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ── Welcome Screen ───────────────────────────────────────────────────────── */
+
+#welcome-screen {
+    animation: fade-in-up 0.5s ease-out;
+}
+
+/* ── View Toggle Buttons ──────────────────────────────────────────────────── */
+
+.view-toggle {
+    @apply text-gray-500 bg-transparent;
+}
+
+.view-toggle.active {
+    @apply text-forest-700 bg-white shadow-sm;
+}
+
+.view-toggle:hover:not(.active) {
+    @apply text-gray-700;
+}
+
+/* ── Typing Indicator ─────────────────────────────────────────────────────── */
+
+.typing-indicator {
+    display: flex;
+    gap: 4px;
+    padding: 8px 0;
+}
+
+.typing-indicator span {
+    width: 8px;
+    height: 8px;
+    background-color: #9ca3af;
+    border-radius: 50%;
+    animation: typing-bounce 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) {
+    animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: -0.16s;
+}
+
+@keyframes typing-bounce {
+    0%, 80%, 100% {
+        transform: translateY(0);
+    }
+    40% {
+        transform: translateY(-8px);
+    }
 }

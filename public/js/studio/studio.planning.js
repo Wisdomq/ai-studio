@@ -281,18 +281,42 @@ function formatUserFiles(files) {
 }
 
 function appendMessage(role, content, files = null) {
+    // Hide welcome screen when first message appears
+    document.getElementById('welcome-screen')?.classList.add('hidden');
+    
     const conv = document.getElementById('conversation');
     const el   = document.createElement('div');
     
     const formattedContent = role === 'assistant' ? formatContent(content) : content.replace(/INPUT:[^:]+:[^\s]+/g, '').trim();
     const fileThumbnails = (role === 'user' && files) ? formatUserFiles(files) : '';
     
-    el.className = `fade-in flex ${role === 'user' ? 'msg-user justify-end' : 'msg-ai justify-start'}`;
-    el.innerHTML = `
-        <div class="bubble max-w-[85%] px-4 py-3 text-sm leading-relaxed">
-            ${formattedContent}
-            ${fileThumbnails}
-        </div>`;
+    // Enhanced styling with avatars and better layout
+    if (role === 'user') {
+        el.className = 'fade-in flex msg-user justify-end gap-3';
+        el.innerHTML = `
+            <div class="bubble max-w-[85%] px-4 py-3 text-sm leading-relaxed bg-forest-500 text-white rounded-2xl rounded-tr-sm shadow-sm">
+                ${formattedContent}
+                ${fileThumbnails}
+            </div>
+            <div class="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center shrink-0">
+                <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                </svg>
+            </div>`;
+    } else {
+        el.className = 'fade-in flex msg-ai justify-start gap-3';
+        el.innerHTML = `
+            <div class="w-8 h-8 bg-gradient-to-br from-forest-500 to-forest-600 rounded-full flex items-center justify-center shrink-0">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                </svg>
+            </div>
+            <div class="bubble max-w-[85%] px-4 py-3 text-sm leading-relaxed bg-white border border-gray-200 rounded-2xl rounded-tl-sm shadow-sm">
+                ${formattedContent}
+                ${fileThumbnails}
+            </div>`;
+    }
+    
     conv.appendChild(el);
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     return el;
@@ -343,24 +367,58 @@ function renderSinglePlanCard(plan) {
         audio: 'bg-amber-50 text-amber-700 border-amber-200',
     };
 
-    plan.forEach((step, i) => {
-        const col           = typeColors[step.workflow_type] || 'bg-gray-50 text-gray-700 border-gray-200';
-        const hasDependency = step.depends_on && step.depends_on.length > 0;
-        const el            = document.createElement('div');
-        el.className        = 'flex items-start gap-3 py-2';
-        el.innerHTML = `
-            <div class="flex flex-col items-center">
-                <div class="w-6 h-6 bg-forest-500 text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0">${i + 1}</div>
-                ${i < plan.length - 1 ? '<div class="w-0.5 h-6 bg-forest-200 mt-1"></div>' : ''}
-            </div>
-            <div class="flex-1 min-w-0 pb-2 ${i < plan.length - 1 ? 'border-b border-dashed border-gray-200' : ''}">
-                <div class="text-sm font-medium text-gray-800">${step.purpose}</div>
-                <div class="flex items-center gap-2 mt-1 flex-wrap">
-                    <span class="text-xs px-2 py-0.5 rounded-full border font-medium ${col}">${step.workflow_type}</span>
-                    ${hasDependency ? '<span class="text-xs text-forest-600">← from previous step</span>' : ''}
+    // Group steps by execution_layer
+    const stepsByLayer = {};
+    plan.forEach(step => {
+        const layer = step.execution_layer ?? 0;
+        if (!stepsByLayer[layer]) stepsByLayer[layer] = [];
+        stepsByLayer[layer].push(step);
+    });
+
+    // Render each layer with header
+    const layers = Object.keys(stepsByLayer).sort((a, b) => parseInt(a) - parseInt(b));
+    layers.forEach(layer => {
+        // Create layer header (only if more than one layer exists)
+        if (layers.length > 1) {
+            const layerHeader = document.createElement('div');
+            layerHeader.className = 'flex items-center gap-3 mb-2 mt-4 first:mt-0';
+            layerHeader.innerHTML = `
+                <div class="flex items-center gap-2 px-2.5 py-1 bg-forest-100 border border-forest-200 rounded-lg">
+                    <svg class="w-3.5 h-3.5 text-forest-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
+                    </svg>
+                    <span class="text-xs font-semibold text-forest-700">
+                        Layer ${layer}: ${layer == 0 ? 'Independent' : 'Dependent'}
+                    </span>
                 </div>
-            </div>`;
-        list.appendChild(el);
+            `;
+            list.appendChild(layerHeader);
+        }
+
+        // Render steps in this layer
+        stepsByLayer[layer].forEach((step, layerIndex) => {
+            const i             = plan.findIndex(s => s.step_order === step.step_order);
+            const col           = typeColors[step.workflow_type] || 'bg-gray-50 text-gray-700 border-gray-200';
+            const hasDependency = step.depends_on && step.depends_on.length > 0;
+            const isLastInLayer = layerIndex === stepsByLayer[layer].length - 1;
+            const isLastOverall = i === plan.length - 1;
+            
+            const el            = document.createElement('div');
+            el.className        = 'flex items-start gap-3 py-2';
+            el.innerHTML = `
+                <div class="flex flex-col items-center">
+                    <div class="w-6 h-6 bg-forest-500 text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0">${i + 1}</div>
+                    ${!isLastOverall ? '<div class="w-0.5 h-6 bg-forest-200 mt-1"></div>' : ''}
+                </div>
+                <div class="flex-1 min-w-0 pb-2 ${!isLastOverall ? 'border-b border-dashed border-gray-200' : ''}">
+                    <div class="text-sm font-medium text-gray-800">${step.purpose}</div>
+                    <div class="flex items-center gap-2 mt-1 flex-wrap">
+                        <span class="text-xs px-2 py-0.5 rounded-full border font-medium ${col}">${step.workflow_type}</span>
+                        ${hasDependency ? '<span class="text-xs text-forest-600">← from previous step</span>' : ''}
+                    </div>
+                </div>`;
+            list.appendChild(el);
+        });
     });
 
     document.getElementById('plan-card').classList.remove('hidden');
@@ -411,52 +469,82 @@ function renderMultiPlanCards(plan) {
         <div class="h-px flex-1 bg-forest-100"></div>`;
     wrapper.appendChild(headerEl);
 
-    plan.forEach((step, i) => {
-        const c             = typeColors[step.workflow_type] || typeColors.image;
-        const hasDependency = step.depends_on && step.depends_on.length > 0;
-        const dependsOnStep = hasDependency ? step.depends_on[step.depends_on.length - 1] + 1 : null;
+    // Group steps by execution_layer
+    const stepsByLayer = {};
+    plan.forEach(step => {
+        const layer = step.execution_layer ?? 0;
+        if (!stepsByLayer[layer]) stepsByLayer[layer] = [];
+        stepsByLayer[layer].push(step);
+    });
 
-        const card = document.createElement('div');
-        card.id        = `plan-card-step-${step.step_order}`;
-        card.className = `slide-in bg-white border ${c.border} rounded-2xl overflow-hidden shadow-sm`;
-        card.innerHTML = `
-            <div class="bg-forest-50 border-b border-forest-100 px-5 py-3 flex items-center gap-2">
-                <div class="w-5 h-5 bg-forest-500 text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0">${i + 1}</div>
+    // Render each layer with header
+    const layers = Object.keys(stepsByLayer).sort((a, b) => parseInt(a) - parseInt(b));
+    layers.forEach(layer => {
+        // Create layer header
+        const layerHeader = document.createElement('div');
+        layerHeader.className = 'flex items-center gap-3 mb-3 mt-6 first:mt-3';
+        layerHeader.innerHTML = `
+            <div class="flex items-center gap-2 px-3 py-1.5 bg-forest-100 border border-forest-200 rounded-lg">
                 <svg class="w-4 h-4 text-forest-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
                 </svg>
-                <span class="text-sm font-semibold text-forest-700">Step ${i + 1} of ${plan.length}</span>
+                <span class="text-sm font-semibold text-forest-700">
+                    Layer ${layer}: ${layer == 0 ? 'Independent Steps' : 'Dependent Steps'}
+                </span>
             </div>
-            <div class="px-5 py-4">
-                <div class="text-sm font-medium text-gray-800 mb-2">${step.purpose}</div>
-                <div class="flex items-center gap-2 flex-wrap">
-                    <span class="text-xs px-2 py-0.5 rounded-full border font-medium ${c.badge}">${step.workflow_type}</span>
-                    ${hasDependency ? '<span class="text-xs text-forest-600 flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4"/></svg>uses output from step ' + dependsOnStep + '</span>' : ''}
-                </div>
-            </div>
-            <div class="px-5 pb-5 flex gap-3">
-                <button class="btn-approve-step-card flex-1 px-4 py-2.5 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-medium transition shadow-sm flex items-center justify-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+            <span class="text-xs text-gray-500">${stepsByLayer[layer].length} step${stepsByLayer[layer].length > 1 ? 's' : ''}</span>
+        `;
+        wrapper.appendChild(layerHeader);
+
+        // Render steps in this layer
+        stepsByLayer[layer].forEach((step, layerIndex) => {
+            const i             = plan.findIndex(s => s.step_order === step.step_order);
+            const c             = typeColors[step.workflow_type] || typeColors.image;
+            const hasDependency = step.depends_on && step.depends_on.length > 0;
+            const dependsOnStep = hasDependency ? step.depends_on[step.depends_on.length - 1] + 1 : null;
+
+            const card = document.createElement('div');
+            card.id        = `plan-card-step-${step.step_order}`;
+            card.className = `slide-in bg-white border ${c.border} rounded-2xl overflow-hidden shadow-sm`;
+            card.innerHTML = `
+                <div class="bg-forest-50 border-b border-forest-100 px-5 py-3 flex items-center gap-2">
+                    <div class="w-5 h-5 bg-forest-500 text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0">${i + 1}</div>
+                    <svg class="w-4 h-4 text-forest-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
                     </svg>
-                    Approve Step ${i + 1}
-                </button>
-                <button class="btn-reject-step-card px-4 py-2.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-xl text-sm font-medium transition">
-                    Skip
-                </button>
-            </div>`;
+                    <span class="text-sm font-semibold text-forest-700">Step ${i + 1} of ${plan.length}</span>
+                </div>
+                <div class="px-5 py-4">
+                    <div class="text-sm font-medium text-gray-800 mb-2">${step.purpose}</div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-xs px-2 py-0.5 rounded-full border font-medium ${c.badge}">${step.workflow_type}</span>
+                        ${hasDependency ? '<span class="text-xs text-forest-600 flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4"/></svg>uses output from step ' + dependsOnStep + '</span>' : ''}
+                    </div>
+                </div>
+                <div class="px-5 pb-5 flex gap-3">
+                    <button class="btn-approve-step-card flex-1 px-4 py-2.5 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-medium transition shadow-sm flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+                        </svg>
+                        Approve Step ${i + 1}
+                    </button>
+                    <button class="btn-reject-step-card px-4 py-2.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-xl text-sm font-medium transition">
+                        Skip
+                    </button>
+                </div>`;
 
-        // Approve button
-        card.querySelector('.btn-approve-step-card').addEventListener('click', () => {
-            markStepCardApproved(step.step_order, card);
+            // Approve button
+            card.querySelector('.btn-approve-step-card').addEventListener('click', () => {
+                markStepCardApproved(step.step_order, card);
+            });
+
+            // Reject/skip button — removes this step from the plan
+            card.querySelector('.btn-reject-step-card').addEventListener('click', () => {
+                markStepCardRejected(step.step_order, card);
+            });
+
+            wrapper.appendChild(card);
         });
-
-        // Reject/skip button — removes this step from the plan
-        card.querySelector('.btn-reject-step-card').addEventListener('click', () => {
-            markStepCardRejected(step.step_order, card);
-        });
-
-        wrapper.appendChild(card);
     });
 
     // Insert above the input area
@@ -541,6 +629,48 @@ function checkAllStepCardsDecided() {
             step_order: newIndex,
             depends_on: remappedDeps,
         };
+    });
+
+    // ── Validate dependencies: block if any approved step depends on a skipped step ────
+    const invalidDeps = [];
+    approvedStepsRaw.forEach((step, newIndex) => {
+        const deps = step.depends_on;
+        if (!deps) return;
+        
+        const depValues = Array.isArray(deps) ? deps : Object.values(deps);
+        depValues.forEach(oldIdx => {
+            if (oldToNew[oldIdx] === undefined) {
+                invalidDeps.push({
+                    stepNum: newIndex + 1,
+                    purpose: step.purpose || `Step ${newIndex + 1}`,
+                    missingStep: oldIdx + 1
+                });
+            }
+        });
+    });
+
+    if (invalidDeps.length > 0) {
+        const errorMsg = invalidDeps.map(d => 
+            `• Step ${d.stepNum} (${d.purpose}) depends on skipped Step ${d.missingStep}`
+        ).join('\n');
+        
+        alert(`⚠️ Cannot proceed — dependency conflict:\n\n${errorMsg}\n\nPlease approve the required steps or skip the dependent steps.`);
+        return;
+    }
+
+    // ── Recompute execution_layer after remapping (topological sort) ────
+    approvedSteps.forEach(step => {
+        const deps = step.depends_on;
+        if (!deps || (Array.isArray(deps) && deps.length === 0) || (typeof deps === 'object' && Object.keys(deps).length === 0)) {
+            step.execution_layer = 0;
+        } else {
+            const depValues = Array.isArray(deps) ? deps : Object.values(deps);
+            const maxDepLayer = Math.max(...depValues.map(depIdx => {
+                const depStep = approvedSteps.find(s => s.step_order === depIdx);
+                return depStep?.execution_layer ?? 0;
+            }));
+            step.execution_layer = maxDepLayer + 1;
+        }
     });
 
     if (approvedSteps.length === 0) {
@@ -849,3 +979,48 @@ function exportPrompts() {
 document.addEventListener('DOMContentLoaded', () => {
     renderWorkflowsPanel();
 });
+
+
+// ── Welcome Screen & Quick Actions ────────────────────────────────────────────
+
+function useExamplePrompt(prompt) {
+    const input = document.getElementById('user-input');
+    input.value = prompt;
+    input.focus();
+    
+    // Hide welcome screen
+    document.getElementById('welcome-screen')?.classList.add('hidden');
+    
+    // Optional: auto-send after a brief delay
+    setTimeout(() => {
+        document.getElementById('btn-send').click();
+    }, 300);
+}
+
+// Hide welcome screen when user starts typing
+document.getElementById('user-input')?.addEventListener('input', function() {
+    if (this.value.trim().length > 0) {
+        document.getElementById('welcome-screen')?.classList.add('hidden');
+    }
+});
+
+// Show/hide welcome screen based on conversation state
+function updateWelcomeScreen() {
+    const welcomeScreen = document.getElementById('welcome-screen');
+    const conversation = document.getElementById('conversation');
+    
+    if (welcomeScreen && conversation) {
+        const hasMessages = conversation.children.length > 0;
+        welcomeScreen.classList.toggle('hidden', hasMessages);
+    }
+}
+
+// ── Typing Indicator ──────────────────────────────────────────────────────────
+
+function showTypingIndicator() {
+    document.getElementById('typing-indicator')?.classList.remove('hidden');
+}
+
+function hideTypingIndicator() {
+    document.getElementById('typing-indicator')?.classList.add('hidden');
+}

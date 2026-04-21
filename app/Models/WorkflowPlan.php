@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class WorkflowPlan extends Model
@@ -55,14 +56,17 @@ class WorkflowPlan extends Model
 
     public function addToQueue(): void
     {
-        $nextPosition = self::where('session_id', $this->session_id)
-            ->where('status', self::STATUS_QUEUED)
-            ->max('queue_position') ?? 0;
+        DB::transaction(function () {
+            $nextPosition = self::where('session_id', $this->session_id)
+                ->where('status', self::STATUS_QUEUED)
+                ->lockForUpdate()
+                ->max('queue_position') ?? 0;
 
-        $this->update([
-            'status'         => self::STATUS_QUEUED,
-            'queue_position' => $nextPosition + 1,
-        ]);
+            $this->update([
+                'status'         => self::STATUS_QUEUED,
+                'queue_position' => $nextPosition + 1,
+            ]);
+        });
     }
 
     // ─── Status payload for frontend polling ─────────────────────────────────

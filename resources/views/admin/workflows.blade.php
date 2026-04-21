@@ -1,39 +1,170 @@
 @extends('layouts.studio')
 
 @section('content')
-<div class="min-h-screen flex flex-col">
+<div class="min-h-screen flex flex-col bg-gray-50">
 
     {{-- Header --}}
-    <header class="bg-white border-b border-forest-100 px-6 py-4 flex items-center justify-between sticky top-0 z-50 shadow-sm">
-        <a href="{{ route('studio.index') }}" class="flex items-center gap-3 hover:opacity-80 transition">
-            <div class="w-8 h-8 bg-forest-500 rounded-lg flex items-center justify-center">
-                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+    <x-studio-navbar currentPage="admin">
+        <x-slot:customActions>
+            <a href="{{ route('studio.index') }}" class="hidden sm:flex items-center gap-2 px-3 py-2 text-gray-600 hover:text-forest-600 hover:bg-forest-50 rounded-lg transition font-medium text-sm">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
                 </svg>
-            </div>
-            <div>
-                <span class="text-lg font-semibold text-gray-900">AI Studio</span>
-                <span class="text-sm text-gray-400 ml-2">Admin</span>
-            </div>
-        </a>
-        <a href="{{ route('studio.index') }}" class="text-sm text-gray-500 hover:text-forest-600 transition font-medium">← Studio</a>
-    </header>
+                Back to Studio
+            </a>
+        </x-slot:customActions>
+    </x-studio-navbar>
 
-    <main class="max-w-6xl mx-auto w-full px-4 py-10 space-y-8">
+    <main class="max-w-7xl mx-auto w-full px-4 py-8 space-y-6">
+
+        {{-- Breadcrumbs --}}
+        <div class="flex items-center gap-2 text-sm text-gray-500">
+            <a href="{{ route('studio.index') }}" class="hover:text-forest-600 transition">Studio</a>
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+            <span class="text-gray-900 font-medium">Admin</span>
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+            <span class="text-gray-900 font-medium">Workflows</span>
+        </div>
+
+        {{-- Stats Dashboard --}}
+        @php
+            $totalWorkflows = $workflows->count();
+            $activeWorkflows = $workflows->where('is_active', true)->count();
+            $imageWorkflows = $workflows->where('output_type', 'image')->count();
+            $videoWorkflows = $workflows->where('output_type', 'video')->count();
+            $audioWorkflows = $workflows->where('output_type', 'audio')->count();
+            $mcpWorkflows = $workflows->filter(fn($w) => !empty($w->mcp_workflow_id))->count();
+        @endphp
+        
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <div class="bg-white border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-gray-500 uppercase">Total</span>
+                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-gray-900">{{ $totalWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">Workflows</div>
+            </div>
+
+            <div class="bg-white border border-green-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-green-600 uppercase">Active</span>
+                    <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-green-700">{{ $activeWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">{{ $totalWorkflows > 0 ? round(($activeWorkflows/$totalWorkflows)*100) : 0 }}% enabled</div>
+            </div>
+
+            <div class="bg-white border border-blue-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-blue-600 uppercase">Images</span>
+                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-blue-700">{{ $imageWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">Image gen</div>
+            </div>
+
+            <div class="bg-white border border-purple-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-purple-600 uppercase">Videos</span>
+                    <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-purple-700">{{ $videoWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">Video gen</div>
+            </div>
+
+            <div class="bg-white border border-amber-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-amber-600 uppercase">Audio</span>
+                    <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-amber-700">{{ $audioWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">Audio gen</div>
+            </div>
+
+            <div class="bg-white border border-indigo-200 rounded-xl p-4 hover:shadow-md transition">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-indigo-600 uppercase">MCP</span>
+                    <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div class="text-2xl font-bold text-indigo-700">{{ $mcpWorkflows }}</div>
+                <div class="text-xs text-gray-500 mt-1">Live-fetch</div>
+            </div>
+        </div>
 
         {{-- Page title + actions --}}
-        <div class="flex items-center justify-between">
+        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
-                <h1 class="text-2xl font-semibold text-gray-900">Workflows</h1>
-                <p class="text-sm text-gray-500 mt-1">Manage generation workflows and import from ComfyUI</p>
+                <h1 class="text-2xl font-bold text-gray-900">Workflow Management</h1>
+                <p class="text-sm text-gray-500 mt-1">Configure and import AI generation workflows</p>
             </div>
             <button onclick="document.getElementById('import-panel').classList.toggle('hidden')"
-                class="flex items-center gap-2 px-5 py-2.5 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-medium transition shadow-sm">
+                class="flex items-center gap-2 px-5 py-2.5 bg-forest-500 hover:bg-forest-600 text-white rounded-xl text-sm font-semibold transition shadow-sm">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
                 </svg>
                 Import Workflow
             </button>
+        </div>
+
+        {{-- Search & Filter Bar --}}
+        <div class="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+            <div class="flex flex-col md:flex-row gap-3">
+                <div class="flex-1">
+                    <div class="relative">
+                        <input type="text" id="search-workflows" placeholder="Search workflows..." 
+                            class="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-forest-400 focus:ring-2 focus:ring-forest-100">
+                        <svg class="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                        </svg>
+                    </div>
+                </div>
+                <select id="filter-output-type" class="px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-forest-400">
+                    <option value="all">All Types</option>
+                    <option value="image">Images</option>
+                    <option value="video">Videos</option>
+                    <option value="audio">Audio</option>
+                </select>
+                <select id="filter-capability" class="px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-forest-400">
+                    <option value="all">All Capabilities</option>
+                    @foreach($capabilities->groupBy('category') as $category => $caps)
+                        <optgroup label="{{ ucfirst($category) }}">
+                            @foreach($caps as $cap)
+                                <option value="{{ $cap->slug }}">{{ $cap->name }}</option>
+                            @endforeach
+                        </optgroup>
+                    @endforeach
+                </select>
+                <select id="filter-source" class="px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-forest-400">
+                    <option value="all">All Sources</option>
+                    <option value="mcp">MCP Live</option>
+                    <option value="db">Database</option>
+                </select>
+                <select id="filter-status" class="px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-forest-400">
+                    <option value="all">All Status</option>
+                    <option value="active">Active Only</option>
+                    <option value="inactive">Inactive Only</option>
+                </select>
+                <span id="results-count" class="flex items-center px-3 text-sm text-gray-500 font-medium">
+                    {{ $totalWorkflows }} workflow{{ $totalWorkflows !== 1 ? 's' : '' }}
+                </span>
+            </div>
         </div>
 
         {{-- ── Import Panel ────────────────────────────────────────────────── --}}
@@ -438,7 +569,8 @@
                         data-type="{{ $workflow->type }}"
                         data-output-type="{{ $workflow->output_type }}"
                         data-input-types="{{ implode(',', $workflow->input_types ?? []) }}"
-                        data-inject-keys="{{ addslashes(json_encode($workflow->inject_keys ?? [])) }}">
+                        data-inject-keys="{{ addslashes(json_encode($workflow->inject_keys ?? [])) }}"
+                        data-capabilities="{{ $workflow->capabilities->pluck('slug')->implode(',') }}">
                         <td class="px-5 py-4">
                             <div class="font-medium text-gray-800 flex items-center gap-2">
                                 {{ $workflow->name }}
@@ -447,6 +579,21 @@
                                 @endif
                             </div>
                             <div class="text-xs text-gray-400 mt-0.5">{{ Str::limit($workflow->description, 60) }}</div>
+                            
+                            {{-- Capability Badges --}}
+                            @if($workflow->capabilities->isNotEmpty())
+                                <div class="flex flex-wrap gap-1 mt-2">
+                                    @foreach($workflow->capabilities as $capability)
+                                        <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md text-[10px] font-medium"
+                                            title="{{ $capability->description }}">
+                                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                                            </svg>
+                                            {{ $capability->name }}
+                                        </span>
+                                    @endforeach
+                                </div>
+                            @endif
                         </td>
                         <td class="px-5 py-4">
                             <span class="px-2.5 py-1 rounded-full text-xs font-medium border {{ $col }}">
@@ -532,6 +679,7 @@
     </main>
 </div>
 
+<script src="{{ asset('js/admin/workflows.js') }}"></script>
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 

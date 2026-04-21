@@ -28,7 +28,6 @@ Route::post('/studio/plan/{plan}/step/{order}/confirm',    [StudioController::cl
 Route::get('/studio/plan/{plan}/review',                   [StudioController::class, 'review'])->name('studio.plan.review');
 Route::post('/studio/plan/{plan}/dispatch',                [StudioController::class, 'dispatch'])->name('studio.plan.dispatch');
 Route::post('/studio/plan/{plan}/queue',                   [StudioController::class, 'queuePlan'])->name('studio.plan.queue');
-Route::post('/studio/plan/{plan}/dispatch-from-queue',     [StudioController::class, 'dispatchFromQueue'])->name('studio.plan.dispatch-from-queue');
 Route::get('/studio/plan/{plan}/status',                   [StudioController::class, 'status'])->name('studio.plan.status');
 Route::post('/studio/plan/{plan}/step/{order}/approve',    [StudioController::class, 'approveStep'])->name('studio.plan.step.approve');
 Route::post('/studio/plan/{plan}/step/{order}/reject',     [StudioController::class, 'rejectStep'])->name('studio.plan.step.reject');

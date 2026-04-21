@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Workflow extends Model
 {
@@ -55,6 +56,17 @@ class Workflow extends Model
     public function planSteps(): HasMany
     {
         return $this->hasMany(WorkflowPlanStep::class);
+    }
+
+    public function capabilities(): BelongsToMany
+    {
+        return $this->belongsToMany(Capability::class, 'capability_workflow')
+            ->withTimestamps();
+    }
+
+    public function primaryCapability(): ?Capability
+    {
+        return $this->capabilities()->where('is_active', true)->first();
     }
 
     // ── Scopes ────────────────────────────────────────────────────────────────

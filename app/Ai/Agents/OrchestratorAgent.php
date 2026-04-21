@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Helpers\ExecutionLayerHelper;
 use App\Models\Workflow;
 use Illuminate\Support\Facades\Log;
 use Prism\Prism\Enums\Provider;
@@ -24,6 +25,8 @@ use Prism\Prism\ValueObjects\Messages\UserMessage;
  */
 class OrchestratorAgent
 {
+    use ExecutionLayerHelper;
+
     protected string $model;
 
     public function __construct(string $model = 'mistral:7b')
@@ -446,6 +449,8 @@ SYSPROMPT;
         return ['type' => 'no_signal', 'workflow_ids' => [], 'plan' => null];
     }
 
+    /**
+     * Resolve capability IDs to workflow IDs.
     /**
      * Scan response prose for bare workflow ID mentions that weren't caught by
      * READY: signals. Matches patterns like:

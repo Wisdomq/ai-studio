@@ -4,13 +4,17 @@ namespace App\Http\Controllers;
 
 use App\Ai\Agents\OrchestratorAgent;
 use App\Ai\Agents\WorkflowOptimizerAgent;
-use App\Jobs\ExecutePlanJob;
+use App\Ai\Helpers\ExecutionLayerHelper;
 use App\Models\WorkflowPlan;
 use App\Models\WorkflowPlanStep;
 use App\Models\Workflow;
 use App\Ai\Skills\WorkflowBuilderSkill;
 use App\Services\WorkflowBuilderService;
 use App\Services\McpService;
+use App\Services\PlanningService;
+use App\Services\RefinementService;
+use App\Services\ExecutionService;
+use App\Services\ApprovalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -161,7 +165,7 @@ class StudioController extends Controller
     // Phase 1 — Planning (SSE)
     // ─────────────────────────────────────────────────────────────────────────
 
-    public function planner(Request $request): \Symfony\Component\HttpFoundation\StreamedResponse
+    public function planner(Request $request, PlanningService $planningService): \Symfony\Component\HttpFoundation\StreamedResponse
     {
         $request->validate([
             'messages' => 'required|array',
@@ -170,65 +174,29 @@ class StudioController extends Controller
         ]);
 
         $messages = $request->input('messages');
-        $agent    = new OrchestratorAgent($this->model);
 
-        return response()->stream(function () use ($messages, $agent) {
+        return response()->stream(function () use ($messages, $planningService) {
 
             try {
-                $fullText = $agent->stream($messages, function (string $chunk) {
+                $signal = $planningService->streamPlanning($messages, function (string $chunk) {
                     $this->sseEmit(['type' => 'chunk', 'content' => $chunk]);
                 });
 
-                $signal = $agent->parseSignal($fullText, $messages);
-
-                if ($signal['type'] === 'ready' && $signal['plan'] !== null) {
+                // Emit appropriate response based on signal type
+                if ($signal['type'] === 'ready' && isset($signal['plan'])) {
                     $this->sseEmit(['type' => 'plan', 'plan' => $signal['plan']]);
 
                 } elseif ($signal['type'] === 'ambiguous') {
-                    $workflows = \App\Models\Workflow::active()
-                        ->whereIn('id', $signal['workflow_ids'])
-                        ->get(['id', 'name', 'description', 'output_type', 'type', 'input_types'])
-                        ->map(fn($w) => [
-                            'id'          => $w->id,
-                            'name'        => $w->name,
-                            'description' => $w->description,
-                            'output_type' => $w->output_type,
-                            'type'        => $w->type,
-                            'input_types' => $w->input_types ?? [],
-                        ])
-                        ->values()
-                        ->all();
-
                     $this->sseEmit([
                         'type'      => 'ambiguous',
-                        'workflows' => $workflows,
+                        'workflows' => $signal['workflows'],
                     ]);
 
                 } elseif ($signal['type'] === 'create_workflow') {
-                    // Extract user intent from conversation
-                    $userIntent = '';
-                    foreach ($messages as $msg) {
-                        if ($msg['role'] === 'user') {
-                            $userIntent = $msg['content'];
-                            break;
-                        }
-                    }
-                    if (empty($userIntent) && ! empty($signal['intent'])) {
-                        $userIntent = $signal['intent'];
-                    }
-
-                    // Do NOT save yet — emit a proposal so the user can confirm or cancel
-                    // The actual save happens in confirmWorkflow() after user clicks Accept
                     $this->sseEmit([
                         'type'    => 'workflow_proposed',
-                        'intent'  => $userIntent,
+                        'intent'  => $signal['intent'],
                     ]);
-
-                } else {
-                    $plan = $agent->parsePlan($fullText);
-                    if ($plan !== null) {
-                        $this->sseEmit(['type' => 'plan', 'plan' => $plan]);
-                    }
                 }
 
             } catch (\Illuminate\Http\Client\ConnectionException $e) {
@@ -258,7 +226,7 @@ class StudioController extends Controller
      * POST /studio/plan/approve
      * Create WorkflowPlan + WorkflowPlanStep DB records from approved plan.
      */
-    public function approvePlan(Request $request): JsonResponse
+    public function approvePlan(Request $request, PlanningService $planningService): JsonResponse
     {
         $request->validate([
             'user_intent' => 'required|string',
@@ -275,48 +243,19 @@ class StudioController extends Controller
             'files.*.media_type'   => 'required|string|in:image,video,audio',
         ]);
 
-        $sessionId = session()->getId();
-        $inputFiles = $request->input('files', []);
+        $plan = $planningService->createPlan(
+            session()->getId(),
+            $request->input('user_intent'),
+            $request->input('steps'),
+            $request->input('files', [])
+        );
 
-        $plan = WorkflowPlan::create([
-            'session_id'   => $sessionId,
-            'user_intent' => $request->input('user_intent'),
-            'plan_steps'   => $request->input('steps'),
-            'status'       => 'pending',
-            'input_files'  => $inputFiles,
-        ]);
-
-        foreach ($request->input('steps') as $stepData) {
-            $workflow = Workflow::findOrFail((int) $stepData['workflow_id']);
-
-            WorkflowPlanStep::create([
-                'plan_id'         => $plan->id,
-                'workflow_id'     => $workflow->id,
-                'step_order'      => (int) $stepData['step_order'],
-                'execution_layer' => (int) ($stepData['execution_layer'] ?? 0),
-                'workflow_type'   => $stepData['workflow_type'],
-                'purpose'         => $stepData['purpose'],
-                'depends_on'      => $stepData['depends_on'] ?? [],
-                'status'          => 'pending',
-            ]);
-        }
-
-        session(['workflow_session_id' => $sessionId]);
+        session(['workflow_session_id' => session()->getId()]);
 
         return response()->json([
-            'plan_id'    => $plan->id,
-            'input_files' => $inputFiles,
-            'steps'      => $plan->steps()->orderBy('step_order')->with('workflow')->get()
-                ->map(fn($s) => [
-                    'id'              => $s->id,
-                    'step_order'      => $s->step_order,
-                    'execution_layer' => $s->execution_layer,
-                    'purpose'         => $s->purpose,
-                    'workflow_type'   => $s->workflow_type,
-                    'input_types'     => $s->workflow->input_types ?? [],
-                    'output_type'     => $s->workflow->output_type ?? null,
-                    'depends_on'      => $s->depends_on ?? [],
-                ]),
+            'plan_id'     => $plan->id,
+            'input_files' => $plan->input_files,
+            'steps'       => $planningService->getStepsPayload($plan),
         ]);
     }
 
@@ -328,7 +267,7 @@ class StudioController extends Controller
      * POST /studio/plan/refine-step
      * SSE stream: WorkflowOptimizerAgent for one plan step.
      */
-    public function refineStep(Request $request): \Symfony\Component\HttpFoundation\StreamedResponse
+    public function refineStep(Request $request, RefinementService $refinementService): \Symfony\Component\HttpFoundation\StreamedResponse
     {
         $request->validate([
             'plan_id'     => 'required|integer|exists:workflow_plans,id',
@@ -343,27 +282,17 @@ class StudioController extends Controller
 
         $step = $plan->steps()->where('step_order', $request->input('step_order'))->with('workflow')->firstOrFail();
 
-        $messages   = $request->input('messages');
-        $turnNumber = $request->input('turn_number');
-        $isRedo     = (bool) $request->input('is_redo', false);
-        $outputType = $step->workflow->output_type;
-        $agent      = new WorkflowOptimizerAgent($this->model);
-
-        // On redo, the agent resets to turn 1 but the seed message already contains
-        // the full context (original intent + rejection reason). Nudging turnNumber
-        // to at least 2 pushes the agent past its "ask clarifying questions" phase
-        // and into prompt-proposal mode immediately.
-        if ($isRedo && $turnNumber <= 1) {
-            $turnNumber = 2;
-        }
-
-        return response()->stream(function () use ($messages, $outputType, $turnNumber, $agent) {
+        return response()->stream(function () use ($request, $step, $refinementService) {
             try {
-                $fullText = $agent->stream($messages, $outputType, $turnNumber, function (string $chunk) {
-                    $this->sseEmit(['type' => 'chunk', 'content' => $chunk]);
-                });
-
-                $approvedPrompt = $agent->parseApprovedPrompt($fullText);
+                $approvedPrompt = $refinementService->streamRefinement(
+                    $step,
+                    $request->input('messages'),
+                    $request->input('turn_number'),
+                    (bool) $request->input('is_redo', false),
+                    function (string $chunk) {
+                        $this->sseEmit(['type' => 'chunk', 'content' => $chunk]);
+                    }
+                );
 
                 if ($approvedPrompt !== null) {
                     $this->sseEmit(['type' => 'approved', 'prompt' => $approvedPrompt]);
@@ -403,7 +332,7 @@ class StudioController extends Controller
      * upstream approvals (each contributing a different media type) accumulate
      * correctly rather than overwriting each other.
      */
-    public function confirmStep(Request $request, WorkflowPlan $plan, int $order): JsonResponse
+    public function confirmStep(Request $request, WorkflowPlan $plan, int $order, RefinementService $refinementService): JsonResponse
     {
         $this->authorisePlan($plan);
 
@@ -417,60 +346,27 @@ class StudioController extends Controller
 
         $step = $plan->steps()->where('step_order', $order)->firstOrFail();
 
-        $updateData = [];
-
-        // Only write refined_prompt when provided and not already confirmed —
-        // auto-chain calls from approveStep() send no prompt; user prompt must not be overwritten.
-        if ($request->filled('refined_prompt') && empty($step->refined_prompt)) {
-            $updateData['refined_prompt'] = $request->input('refined_prompt');
-        } elseif ($request->filled('refined_prompt')) {
-            // Explicit user re-confirmation (e.g. redo) — always accept
-            $updateData['refined_prompt'] = $request->input('refined_prompt');
-        }
-
-        // Multi-input files: merge into existing map so successive chain calls accumulate
-        if ($request->filled('input_files')) {
-            $existing = $step->input_files ?? [];
-            $updateData['input_files'] = array_merge($existing, $request->input('input_files'));
-        }
-
-        // Legacy single-file path — still supported for backward compat
-        if ($request->filled('input_file_path') && ! $request->filled('input_files')) {
-            $updateData['input_file_path'] = $request->input('input_file_path');
-        }
-
-        if (! empty($updateData)) {
-            $step->update($updateData);
-        }
+        $refinementService->confirmStep(
+            $step,
+            $request->input('refined_prompt'),
+            $request->input('input_files', []),
+            $request->input('input_file_path')
+        );
 
         return response()->json(['success' => true, 'step_order' => $order]);
     }
-    public function cancelStep(WorkflowPlan $plan, int $order, McpService $mcp): JsonResponse
+    public function cancelStep(WorkflowPlan $plan, int $order, ApprovalService $approvalService, McpService $mcp): JsonResponse
     {
+        $this->authorisePlan($plan);
+
         $step = $plan->steps()->where('step_order', $order)->firstOrFail();
- 
-    // Only running steps can be cancelled — guard against double-cancel
-        if (! $step->isRunning() && ! $step->isAwaitingApproval()) {
-            return response()->json([
-                'success' => false,
-                'error'   => "Step {$order} is not in a cancellable state (status: {$step->status}).",
-            ], 422);
+        $result = $approvalService->cancelStep($step, $mcp);
+
+        if (!$result['success']) {
+            return response()->json(['error' => $result['error']], 422);
         }
- 
-    // Fire-and-forget the ComfyUI cancel — even if it fails, we mark cancelled
-    // in the DB so the plan loop stops. The ComfyUI job may finish naturally
-    // but its output will be ignored since the plan is halted.
-        if ($step->comfy_job_id) {
-            $cancelled = $mcp->cancelJob($step->comfy_job_id);
-            Log::info("StudioController::cancelStep: ComfyUI cancel result", [
-                'job_id'    => $step->comfy_job_id,
-                'cancelled' => $cancelled,
-            ]);
-        }
- 
-        $step->markCancelled();
- 
-        return response()->json(['success' => true]);
+
+        return response()->json($result);
     }
  
 /**
@@ -514,99 +410,59 @@ class StudioController extends Controller
      * POST /studio/plan/{plan}/dispatch
      * Fire ExecutePlanJob immediately.
      */
-    public function dispatch(WorkflowPlan $plan): JsonResponse
+    public function dispatch(WorkflowPlan $plan, ExecutionService $executionService): JsonResponse
     {
         $this->authorisePlan($plan);
 
-        $unconfirmed = $plan->steps()->whereNull('refined_prompt')->count();
-        if ($unconfirmed > 0) {
-            return response()->json(['error' => "{$unconfirmed} step(s) need confirmed prompts."], 422);
+        $result = $executionService->dispatchPlan($plan);
+
+        if (!$result['success']) {
+            return response()->json(['error' => $result['error']], 422);
         }
 
-        // Don't block re-dispatch after rejection — only block if truly already running
-        if ($plan->isRunning()) {
-            return response()->json(['error' => 'Plan is already running.'], 422);
-        }
-
-        // Reset plan to pending so job can mark it running cleanly
-        $plan->update(['status' => WorkflowPlan::STATUS_PENDING]);
-
-        ExecutePlanJob::dispatch($plan->id);
-
-        Log::info("StudioController: Dispatched plan #{$plan->id}");
-
-        return response()->json(['success' => true, 'plan_id' => $plan->id]);
+        return response()->json($result);
     }
 
     /**
      * POST /studio/plan/{plan}/queue
      * Add plan to backlog queue instead of dispatching immediately.
      */
-    public function queuePlan(WorkflowPlan $plan): JsonResponse
+    public function queuePlan(WorkflowPlan $plan, ExecutionService $executionService): JsonResponse
     {
         $this->authorisePlan($plan);
 
-        $unconfirmed = $plan->steps()->whereNull('refined_prompt')->count();
-        if ($unconfirmed > 0) {
-            return response()->json(['error' => "{$unconfirmed} step(s) need confirmed prompts."], 422);
+        $result = $executionService->queuePlan($plan, session()->getId());
+
+        if (!$result['success']) {
+            return response()->json(['error' => $result['error']], 422);
         }
 
-        // Auto-dispatch immediately if nothing running
-        if (! WorkflowPlan::hasRunning(session()->getId())) {
-            $plan->update(['status' => WorkflowPlan::STATUS_PENDING]);
-            ExecutePlanJob::dispatch($plan->id);
-            return response()->json(['success' => true, 'plan_id' => $plan->id, 'auto_dispatched' => true]);
-        }
-
-        // Otherwise add to queue backlog
-        $plan->addToQueue();
-
-        return response()->json([
-            'success'         => true,
-            'plan_id'         => $plan->id,
-            'queue_position'  => $plan->fresh()->queue_position,
-            'auto_dispatched' => false,
-        ]);
+        return response()->json($result);
     }
 
     /**
      * POST /studio/queue/run-next
      * Manually trigger the next queued plan.
      */
-    public function runNextInQueue(): JsonResponse
+    public function runNextInQueue(ExecutionService $executionService): JsonResponse
     {
-        $sessionId = session()->getId();
+        $result = $executionService->runNextInQueue(session()->getId());
 
-        if (WorkflowPlan::hasRunning($sessionId)) {
-            return response()->json(['error' => 'A job is already running.'], 422);
+        if (!$result['success']) {
+            $statusCode = $result['error'] === 'No queued plans found.' ? 404 : 422;
+            return response()->json(['error' => $result['error']], $statusCode);
         }
 
-        $next = WorkflowPlan::nextInQueue($sessionId);
-        if (! $next) {
-            return response()->json(['error' => 'No queued plans found.'], 404);
-        }
-
-        $next->update(['status' => WorkflowPlan::STATUS_PENDING]);
-        ExecutePlanJob::dispatch($next->id);
-
-        return response()->json(['success' => true, 'plan_id' => $next->id]);
+        return response()->json($result);
     }
 
     /**
      * GET /studio/jobs
      * Return all session plans for the floating jobs panel.
      */
-    public function jobs(): JsonResponse
+    public function jobs(ExecutionService $executionService): JsonResponse
     {
-        $sessionId = session()->getId();
-
-        $plans = WorkflowPlan::where('session_id', $sessionId)
-            ->with('steps')
-            ->latest()
-            ->take(20)
-            ->get()
-            ->map(fn(WorkflowPlan $plan) => $plan->statusPayload());
-
+        $plans = $executionService->getSessionPlans(session()->getId());
         return response()->json(['plans' => $plans]);
     }
 
@@ -640,89 +496,46 @@ class StudioController extends Controller
      * step so the JS can attach a completed step's output as the input_file_path
      * for any dependent step — without requiring a separate lookup.
      */
-    public function status(WorkflowPlan $plan): JsonResponse
+    public function status(WorkflowPlan $plan, ExecutionService $executionService): JsonResponse
     {
         $this->authorisePlan($plan);
-
-        $payload = $plan->statusPayload();
-
-        // Inject output_path alongside output_url on each step entry.
-        // statusPayload() already loads steps; we just re-key the raw DB value.
-        if (isset($payload['steps']) && is_array($payload['steps'])) {
-            $stepModels = $plan->steps()->orderBy('step_order')->get()->keyBy('step_order');
-
-            $payload['steps'] = array_map(function (array $stepData) use ($stepModels) {
-                $order = $stepData['step_order'] ?? null;
-                if ($order !== null && isset($stepModels[$order])) {
-                    $stepData['output_path'] = $stepModels[$order]->output_path;
-                }
-                return $stepData;
-            }, $payload['steps']);
-        }
-
-        return response()->json($payload);
+        return response()->json($executionService->getPlanStatus($plan));
     }
 
     /**
      * POST /studio/plan/{plan}/step/{order}/approve
      * User approves an intermediate result — step advances to completed.
      */
-    public function approveStep(WorkflowPlan $plan, int $order): JsonResponse
+    public function approveStep(WorkflowPlan $plan, int $order, ApprovalService $approvalService): JsonResponse
     {
         $this->authorisePlan($plan);
 
         $step = $plan->steps()->where('step_order', $order)->firstOrFail();
+        $result = $approvalService->approveStep($step);
 
-        if (! $step->isAwaitingApproval()) {
-            return response()->json(['error' => 'Step is not awaiting approval.'], 422);
+        if (!$result['success']) {
+            return response()->json(['error' => $result['error']], 422);
         }
 
-        $step->markCompleted();
-
-        Log::info("Studio: Plan #{$plan->id} step {$order} approved by user.");
-
-        return response()->json(['success' => true, 'step_order' => $order, 'status' => 'completed']);
+        return response()->json($result);
     }
 
     /**
      * POST /studio/plan/{plan}/step/{order}/reject
      * User rejects an intermediate result — step returns to pending for re-refinement.
      */
-    public function rejectStep(Request $request, WorkflowPlan $plan, int $order): JsonResponse
+    public function rejectStep(Request $request, WorkflowPlan $plan, int $order, ApprovalService $approvalService): JsonResponse
     {
         $this->authorisePlan($plan);
 
         $step = $plan->steps()->where('step_order', $order)->firstOrFail();
+        $result = $approvalService->rejectStep($step, $request->input('rejection_reason'));
 
-        if (! $step->isAwaitingApproval()) {
-            return response()->json(['error' => 'Step is not awaiting approval.'], 422);
+        if (!$result['success']) {
+            return response()->json(['error' => $result['error']], 422);
         }
 
-        $rejectionReason = $request->input('rejection_reason'); // optional free-text from user
-
-        $step->resetForRefinement();
-
-        // Explicitly null the refined_prompt so dispatch() cannot re-use the stale
-        // prompt if the user confirms without changing anything in the redo flow.
-        // input_file_path and input_files are intentionally preserved — the user's
-        // uploaded source files are still valid for the redo attempt.
-        $step->update(['refined_prompt' => null]);
-
-        Log::info("Studio: Plan #{$plan->id} step {$order} rejected by user — reset for re-refinement.", [
-            'rejection_reason' => $rejectionReason,
-        ]);
-
-        // Return step context so the JS can build a grounded redo seed message.
-        // purpose and user_intent anchor the agent to the original intent
-        // and prevent hallucination on re-entry.
-        return response()->json([
-            'success'          => true,
-            'step_order'       => $order,
-            'status'           => 'pending',
-            'purpose'          => $step->purpose,
-            'user_intent'      => $plan->user_intent,
-            'rejection_reason' => $rejectionReason,
-        ]);
+        return response()->json($result);
     }
 
     /**

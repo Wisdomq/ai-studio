@@ -30,10 +30,43 @@
             <p class="text-sm text-gray-500 mt-1">{{ $plan->steps->where('status', 'awaiting_approval')->count() }} step(s) pending your review</p>
         </div>
 
-        @foreach($plan->steps as $step)
-            @if($step->status === 'awaiting_approval' || $step->status === 'completed')
+        @php
+            // Group steps by execution_layer for parallel branch visualization
+            $stepsByLayer = $plan->steps
+                ->filter(fn($s) => $s->status === 'awaiting_approval' || $s->status === 'completed')
+                ->groupBy('execution_layer')
+                ->sortKeys();
+        @endphp
+
+        @foreach($stepsByLayer as $layer => $layerSteps)
+            {{-- Layer Header --}}
+            <div class="slide-in" style="animation-delay: {{ $loop->index * 0.1 }}s">
+                <div class="flex items-center gap-3 mb-3">
+                    <div class="flex items-center gap-2 px-3 py-1.5 bg-forest-100 border border-forest-200 rounded-lg">
+                        <svg class="w-4 h-4 text-forest-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
+                        </svg>
+                        <span class="text-sm font-semibold text-forest-700">
+                            Layer {{ $layer }}: 
+                            @if($layer == 0)
+                                Independent Steps
+                            @else
+                                Dependent Steps
+                            @endif
+                        </span>
+                    </div>
+                    @if($layerSteps->where('status', 'awaiting_approval')->count() > 0)
+                        <span class="text-xs text-gray-500">
+                            {{ $layerSteps->where('status', 'awaiting_approval')->count() }} pending
+                        </span>
+                    @endif
+                </div>
+            </div>
+
+            {{-- Steps in this layer --}}
+            @foreach($layerSteps as $step)
             <div class="slide-in bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm"
-                 style="animation-delay: {{ $loop->index * 0.1 }}s">
+                 style="animation-delay: {{ ($loop->parent->index * 0.1) + ($loop->index * 0.05) }}s">
                 <div class="bg-forest-50 border-b border-forest-100 px-5 py-3 flex items-center justify-between">
                     <div class="flex items-center gap-2">
                         <span class="text-sm font-semibold text-forest-800">{{ $step->purpose }}</span>
@@ -103,7 +136,7 @@
                     </div>
                 @endif
             </div>
-            @endif
+            @endforeach
         @endforeach
 
         @if($plan->steps->every(fn($s) => $s->status === 'completed'))

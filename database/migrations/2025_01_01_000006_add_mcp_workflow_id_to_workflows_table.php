@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Schema;
  * mcp_workflow_id:
  *   Stores the snake_case workflow ID used by the MCP sidecar server
  *   (e.g. "generate_image", "generate_song"). When set on a Workflow record,
- *   ExecutePlanJob fetches the node graph live from MCP at execution time
+ *   the execution jobs fetch the node graph live from MCP at execution time
  *   instead of reading workflow_json from the DB.
  *
  * workflow_json nullable:

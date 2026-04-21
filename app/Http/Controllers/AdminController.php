@@ -25,8 +25,17 @@ class AdminController extends Controller
      */
     public function workflows(): \Illuminate\View\View
     {
-        $workflows = Workflow::orderBy('output_type')->orderBy('name')->get();
-        return view('admin.workflows', compact('workflows'));
+        $workflows = Workflow::with('capabilities')
+            ->orderBy('output_type')
+            ->orderBy('name')
+            ->get();
+        
+        $capabilities = \App\Models\Capability::active()
+            ->orderBy('category')
+            ->orderBy('name')
+            ->get();
+        
+        return view('admin.workflows', compact('workflows', 'capabilities'));
     }
 
     // ── Workflow CRUD ─────────────────────────────────────────────────────────
